@@ -1,7 +1,7 @@
 ---
 name: mboard-design
 description: mboard 的用户和管理界面，覆盖仪表盘、密集列表、主从编辑器和登录表单，以清晰的数据层级服务桌面和移动阅读。
-version: 2026-10-13
+version: e02a4f5448e88bfa7d3e9b5dacf3dd49792c5eef
 ---
 
 # mboard design

@@ -6,7 +6,7 @@ Scenario: 初始化、用户仪表盘、管理仪表盘、密集列表、问题�
 Input: 浏览器测试创建 2 个测试账号、1 个访问分组、1 台接入机器、1 个授权节点、公告和指南。测试通过真实节点接口提交固定流量批次。截图数据属于验收数据。运行页面另用全新空数据库初始化。
 Viewport: 1440 × 900；390 × 844。
 Theme: 浅色和深色。共享双主题变量覆盖两端。
-design.md version: 2026-10-13。
+design.md version: e02a4f5448e88bfa7d3e9b5dacf3dd49792c5eef（本轮实现基准）。
 Generation context: 管理面板由独立新上下文根据 design.md 和固定 API 需求生成。共享组件、外壳和用户页面在主上下文生成。
 Review method: Playwright 驱动实际 Bun HTTP 服务；DOM、computed styles、键盘操作、真实 CRUD；截图人工检查。
 Result: pass。
