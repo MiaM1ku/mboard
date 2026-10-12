@@ -57,6 +57,30 @@ type Resource<T> = {
 type Column<T> = { label: string; render: (row: T) => ReactNode };
 type WithId = { id: number };
 type AdminUser = User & { group_ids?: number[] };
+type ImportedNode = {
+  id: number;
+  name: string;
+  protocol: string;
+  host: string;
+  port: string | number;
+  parent_id: number | null;
+  machine_id: number | null;
+  group_ids: number[];
+  state: "pending";
+  note: string;
+};
+type ImportedMachine = { id: number; name: string; state: "pending" };
+type ImportInventory = {
+  summary: {
+    users: number;
+    nodes: number;
+    machines: number;
+    groups: number;
+    imported_at: string | null;
+  };
+  nodes: ImportedNode[];
+  machines: ImportedMachine[];
+};
 
 function Loading({ label = "正在加载数据" }: { label?: string }) {
   return (
@@ -239,6 +263,128 @@ function Table<T extends WithId>({
   );
 }
 
+function PendingImportPanel({
+  kind,
+  create,
+}: {
+  kind: "nodes" | "machines";
+  create: () => void;
+}) {
+  const inventory = useResource<ImportInventory>(`${ROOT}/imports`);
+  const singular = kind === "nodes" ? "节点" : "机器";
+  const title = `导入${singular}归档`;
+  if (inventory.error)
+    return (
+      <Card>
+        <div className="card-header"><h2>{title}</h2></div>
+        <ErrorState
+          message="导入归档加载遇到问题，请检查服务连接后重试。"
+          retry={inventory.reload}
+        />
+      </Card>
+    );
+  if (inventory.loading || inventory.data === undefined)
+    return (
+      <Card>
+        <Loading label="正在加载导入归档" />
+      </Card>
+    );
+  const { summary, nodes, machines } = inventory.data;
+  if (
+    summary.users === 0 &&
+    summary.nodes === 0 &&
+    summary.machines === 0 &&
+    summary.groups === 0
+  ) return null;
+  const pending = <Badge tone="warning">待接入</Badge>;
+  return (
+    <Card>
+      <div className="card-header mb-custom-toolbar">
+        <div>
+          <h2>{title}</h2>
+          <p className="mb-custom-meta">
+            来源记录：{count(summary.users)} 个账户 · {count(summary.nodes)} 个节点
+            {" · "}{count(summary.machines)} 台机器 · {count(summary.groups)} 个分组
+          </p>
+          {summary.imported_at && (
+            <p className="mb-custom-meta">归档时间：{formatDate(summary.imported_at)}</p>
+          )}
+        </div>
+        <div className="mb-custom-actions">
+          <Button variant="secondary" size="small" onClick={inventory.reload}>
+            刷新归档
+          </Button>
+          <Button size="small" onClick={create}>创建{singular}</Button>
+        </div>
+      </div>
+      <div className="card-body">
+        <p>导入的配置已归档，创建节点并验证后逐台接入 mboard-node</p>
+        <p className="mb-custom-meta">
+          {kind === "nodes"
+            ? "参考来源端点、协议说明和关联信息，创建节点后验证连接与订阅配置。"
+            : "用「创建机器」建立接入记录，保存接入令牌，再逐台部署并验证心跳。"}
+        </p>
+      </div>
+      {kind === "nodes" ? (
+        nodes.length ? (
+          <Table
+            rows={nodes}
+            columns={[
+              {
+                label: "来源节点 / 端点",
+                render: (node) => (
+                  <>
+                    <strong>{node.name}</strong>
+                    <div className="mb-custom-meta mono">#{node.id} · {node.host}:{node.port}</div>
+                  </>
+                ),
+              },
+              {
+                label: "来源协议",
+                render: (node) => (
+                  <>
+                    <span className="mono">{node.protocol}</span>
+                    {node.note && <div className="mb-custom-meta">{node.note}</div>}
+                  </>
+                ),
+              },
+              { label: "接入进度", render: () => pending },
+              {
+                label: "来源关联",
+                render: (node) => (
+                  <>
+                    <div>{node.parent_id === null ? "独立节点" : `父节点 #${node.parent_id}`}</div>
+                    <div className="mb-custom-meta">
+                      {node.machine_id === null ? "待关联机器" : `机器 #${node.machine_id}`}
+                    </div>
+                  </>
+                ),
+              },
+              {
+                label: "来源分组",
+                render: (node) => <GroupNames ids={node.group_ids} groups={undefined} />,
+              },
+            ]}
+          />
+        ) : (
+          <p className="card-body mb-custom-meta">可用「创建节点」建立服务端点并验证配置。</p>
+        )
+      ) : machines.length ? (
+        <Table
+          rows={machines}
+          columns={[
+            { label: "来源机器", render: (machine) => <strong>{machine.name}</strong> },
+            { label: "来源 ID", render: (machine) => <span className="mono">#{machine.id}</span> },
+            { label: "接入进度", render: () => pending },
+          ]}
+        />
+      ) : (
+        <p className="card-body mb-custom-meta">可用「创建机器」建立接入记录并获取令牌。</p>
+      )}
+    </Card>
+  );
+}
+
 type CrudProps<T extends WithId, D> = {
   title: string;
   description: string;
@@ -261,7 +407,7 @@ type CrudProps<T extends WithId, D> = {
   extraActions?: (item: T) => ReactNode;
   saveBlocked?: boolean;
   validate?: (draft: D) => string;
-  toolbar?: ReactNode;
+  toolbar?: ReactNode | ((create: () => void) => ReactNode);
 };
 function CrudPage<T extends WithId, D>({
   title,
@@ -354,7 +500,7 @@ function CrudPage<T extends WithId, D>({
         eyebrow="管理工作台"
         actions={<Button onClick={() => open(null)}>创建{singular}</Button>}
       />
-      {toolbar}
+      {typeof toolbar === "function" ? toolbar(() => open(null)) : toolbar}
       <Card>
         <div className="card-header mb-custom-toolbar">
           <Field label={`搜索${singular}`}>
@@ -875,12 +1021,14 @@ function NodesPage() {
   const machines = useResource<Machine[]>(`${ROOT}/machines`);
   const groups = useResource<Group[]>(`${ROOT}/groups`);
   return (
+    <div className="mb-custom-section-stack">
     <CrudPage<Node, NodeDraft>
       title="节点管理"
       description="配置服务端点、协议和访问分组，将节点部署到接入机器。"
       singular="节点"
       endpoint={`${ROOT}/nodes`}
       resource={nodes}
+      toolbar={(create) => <PendingImportPanel kind="nodes" create={create} />}
       search={(node) => `${node.name} ${node.host} ${node.protocol} ${node.id}`}
       label={(node) => node.name}
       createDraft={() => ({
@@ -1117,6 +1265,7 @@ function NodesPage() {
         </>
       )}
     />
+    </div>
   );
 }
 
@@ -1159,13 +1308,14 @@ function MachinesPage() {
     }
   }
   return (
-    <>
+    <div className="mb-custom-section-stack">
       <CrudPage<Machine, MachineDraft>
         title="机器管理"
         description="接入节点机器，查看心跳、服务版本和配置更新状态。"
         singular="机器"
         endpoint={`${ROOT}/machines`}
         resource={machines}
+        toolbar={(create) => <PendingImportPanel kind="machines" create={create} />}
         search={(machine) =>
           `${machine.name} ${machine.host} ${machine.version ?? ""} ${machine.id}`
         }
@@ -1349,7 +1499,7 @@ function MachinesPage() {
           </>
         )}
       </Modal>
-    </>
+    </div>
   );
 }
 

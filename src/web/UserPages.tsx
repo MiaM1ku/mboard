@@ -139,13 +139,13 @@ function Home({ onNavigate }: { onNavigate: (s: string) => void }) {
             <Kpi
               title="上传流量"
               value={formatBytes(u.upload_bytes)}
-              hint="节点上报累计"
+              hint="账号累计记录"
               icon={<ArrowUp size={18} />}
             />
             <Kpi
               title="下载流量"
               value={formatBytes(u.download_bytes)}
-              hint="节点上报累计"
+              hint="账号累计记录"
               icon={<ArrowDown size={18} />}
             />
           </div>
@@ -173,8 +173,8 @@ function Home({ onNavigate }: { onNavigate: (s: string) => void }) {
                 </div>
                 <div className="subscription-meta">
                   <div>
-                    <span>访问状态</span>
-                    <strong>{u.enabled ? "授权开启" : "等待授权"}</strong>
+                    <span>账号状态</span>
+                    <strong>{u.enabled ? "账号启用" : "账号暂停"}</strong>
                   </div>
                   <div>
                     <span>有效期</span>
@@ -393,7 +393,7 @@ function Nodes() {
             description={
               search
                 ? "用节点名称、地址或协议搜索。"
-                : "管理员配置权限组后，授权节点会显示在这里。"
+                : "管理员接入节点并分配访问组后，可在这里选择连接入口。"
             }
           />
         )}
@@ -883,7 +883,7 @@ function Account({
               ["名称", user.name],
               ["邮箱", user.email],
               ["账号角色", user.role === "admin" ? "管理员" : "用户"],
-              ["访问授权", user.enabled ? "授权开启" : "等待授权"],
+              ["账号状态", user.enabled ? "账号启用" : "账号暂停"],
               ["有效期", formatDate(user.expires_at)],
               ["创建时间", formatDate(user.created_at)],
             ].map(([label, value]) => (

@@ -10,7 +10,7 @@ export function openDatabase(path = ':memory:') {
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`);
   // Numbered, transactionally applied schema migrations. No fixtures or default accounts.
   const version = (db.query('PRAGMA user_version').get() as any).user_version;
-  if (version > 1) throw new Error('Database schema is newer than this server');
+  if (version > 2) throw new Error('Database schema is newer than this server');
   if (version < 1) db.transaction(() => {
     if ((db.query('PRAGMA user_version').get() as any).user_version >= 1) return;
     db.exec(`
@@ -39,6 +39,20 @@ export function openDatabase(path = ':memory:') {
       CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       INSERT INTO settings VALUES ('site_name','mboard'),('site_description','欢迎使用您的连接面板'),('setup_complete','0');
       PRAGMA user_version=1;
+    `);
+  }).immediate();
+  if (version < 2) db.transaction(() => {
+    if ((db.query('PRAGMA user_version').get() as any).user_version >= 2) return;
+    db.exec(`
+      CREATE TABLE legacy_records (
+        kind TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY(kind,id)
+      );
+      CREATE TABLE import_runs (
+        id TEXT PRIMARY KEY, format TEXT NOT NULL, archive_sha256 TEXT NOT NULL,
+        summary TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      PRAGMA user_version=2;
     `);
   }).immediate();
   return db;

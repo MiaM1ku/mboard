@@ -2,6 +2,10 @@
 
 mboard 是独立的连接管理工作区。Bun 承载 HTTP 服务、账号会话和 SQLite 数据，React 承载用户面板和管理面板。配套 Go 节点仓库为 `mboard-node`，两端通过版本化协议通信。
 
+## 远程部署
+
+部署目标为 example-host，上游监听 `http://127.0.0.1:8791`，公开入口为 `https://panel.example`。应用和 SQLite 在服务器的独立目录运行。服务、反代和回退步骤见 [部署说明](docs/deployment.md)。沿用原密码并归档完整节点配置的方案见 [记录先行迁移](docs/staged-migration.md)。
+
 ## 可以做什么
 
 - 用户面板：查看授权节点、复制订阅、下载 sing-box 配置、查看每日用量、阅读公告和指南、提交问题、更新密码和轮换订阅凭据。

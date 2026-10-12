@@ -12,6 +12,14 @@ data/
 *.sqlite-wal
 credentials*.json
 *.credentials.json
+archive.json
+source.env
+*.sql
+*.sql.gz
+/backups/
+/exports/
+__pycache__/
+*.pyc
 playwright-report/
 test-results/
 coverage/

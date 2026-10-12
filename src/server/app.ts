@@ -20,6 +20,11 @@ const password = (v: unknown) => string(v, '至少 12 个字符的密码', 1024,
 const expiry = (v: unknown) => { if (v === null) return null; const s = string(v, '到期时间', 40); if (!/^\d{4}-\d{2}-\d{2}T/.test(s) || !Number.isFinite(Date.parse(s))) fail(400, 'VALIDATION', '请填写 ISO 格式的到期时间'); return new Date(s).toISOString(); };
 const endpoint = (v: unknown) => { const s = string(v, '主机名', 253).trim(); if (!/^[a-zA-Z0-9.:[\]_-]+$/.test(s)) fail(400, 'VALIDATION', '请填写有效的主机名或 IP 地址'); return s; };
 const own = (o: Row, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+// PHP bcrypt truncates at 72 bytes. Bun otherwise prehashes long inputs, which would
+// reject the original password of an imported account. New hashes use argon2id.
+const verifyPassword = (plain: string, digest: string) => Bun.password.verify(
+  /^\$2[aby]\$/.test(digest) ? new TextEncoder().encode(plain).subarray(0, 72) : plain, digest,
+);
 const pick = (body: Row, fields: string[]) => { for (const k of Object.keys(body)) if (!fields.includes(k)) fail(400, 'VALIDATION', `请检查字段：${k.slice(0, 40)}`); };
 
 export function createApp(options: AppOptions = {}) {
@@ -217,7 +222,7 @@ export function createApp(options: AppOptions = {}) {
     if (path === '/api/v1/auth/login' && method === 'POST') {
       const b = await body(req); pick(b, ['email','password']); const addr = email(b.email), pass = string(b.password, '密码', 1024); limit(req, ip, addr);
       const u = get('SELECT * FROM users WHERE email=?', addr);
-      const match = u ? await Bun.password.verify(pass, u.password_hash) : await Bun.password.verify(pass, dummyHash);
+      const match = u ? await verifyPassword(pass, u.password_hash) : await Bun.password.verify(pass, dummyHash);
       if (!match || !u?.enabled) fail(401, 'LOGIN_FAILED', '请检查邮箱、密码和账号启用状态');
       // Re-read after the async hash check: password reset/disable must invalidate an in-flight login.
       const fresh = requireRow('users', u.id);
@@ -236,7 +241,7 @@ export function createApp(options: AppOptions = {}) {
     if (path === '/api/v1/me' && method === 'GET') return json(userView(u));
     if (path === '/api/v1/me/password' && method === 'PATCH') {
       const b = await body(req); pick(b, ['current_password','new_password']); const pass = password(b.new_password);
-      if (!await Bun.password.verify(string(b.current_password, '原密码', 1024), u.password_hash)) fail(400, 'PASSWORD', '请检查原密码');
+      if (!await verifyPassword(string(b.current_password, '原密码', 1024), u.password_hash)) fail(400, 'PASSWORD', '请检查原密码');
       const digest = await Bun.password.hash(pass, { algorithm: 'argon2id' });
       atomic(() => {
         const fresh = requireRow('users', u.id);
@@ -271,6 +276,30 @@ export function createApp(options: AppOptions = {}) {
     }
     if (path.startsWith('/api/v1/admin/')) {
       if (u.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '请使用管理员账号');
+      if (path === '/api/v1/admin/imports' && method === 'GET') {
+        // Explicit display allowlist: never return payloads, protocol_settings,
+        // encrypted settings, password hashes, keys, or old/new credentials.
+        const records = (kind: string) => all('SELECT id,payload FROM legacy_records WHERE kind=? ORDER BY id', kind).map(r => ({ archiveId: r.id, row: JSON.parse(r.payload) as Row }));
+        const safeId = (v: unknown): number | null => /^(?:[1-9]\d*)$/.test(String(v)) && Number.isSafeInteger(Number(v)) ? Number(v) : null;
+        const display = (v: unknown, fallback: string, max = 253) => typeof v === 'string' && v.length <= max && !/[\x00-\x1f\x7f]/.test(v) ? v : fallback;
+        const nodes = records('v2_server').map(({ archiveId, row: r }) => {
+          let gids: unknown = r.group_ids;
+          if (typeof gids === 'string') { try { gids = JSON.parse(gids); } catch { gids = []; } }
+          const protocol = display(r.type ?? r.protocol, 'unknown', 40);
+          const host = display(r.host, '');
+          return { id: safeId(r.id) ?? archiveId, name: display(r.name, `节点 ${archiveId}`, 200),
+            protocol: /^[a-z0-9_-]+$/.test(protocol) ? protocol : 'unknown',
+            host: /^[a-zA-Z0-9.:[\]_-]+$/.test(host) ? host : '',
+            port: safeId(r.port) && Number(r.port) <= 65535 ? Number(r.port) : null,
+            parent_id: safeId(r.parent_id), machine_id: safeId(r.machine_id),
+            group_ids: Array.isArray(gids) ? [...new Set(gids.map(safeId).filter((id): id is number => id !== null))] : [],
+            state: 'pending', note: '原配置已经归档。逐台接入后可恢复这个节点。' };
+        });
+        const machines = records('v2_server_machine').map(({ archiveId, row: r }) => ({ id: safeId(r.id) ?? archiveId, name: display(r.name, `机器 ${archiveId}`, 200), state: 'pending' }));
+        const imported = get('SELECT created_at FROM import_runs ORDER BY created_at DESC LIMIT 1');
+        const count = (kind: string) => get('SELECT COUNT(*) count FROM legacy_records WHERE kind=?', kind)!.count;
+        return json({ summary: { users: count('v2_user'), nodes: nodes.length, machines: machines.length, groups: count('v2_server_group'), imported_at: imported?.created_at ?? null }, nodes, machines });
+      }
       if (path === '/api/v1/admin/overview' && method === 'GET') {
         const machines = all('SELECT * FROM machines ORDER BY last_seen_at DESC,id DESC');
         const nodes = all('SELECT * FROM nodes');

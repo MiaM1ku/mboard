@@ -1,0 +1,31 @@
+[Unit]
+Description=mboard independent connection workspace
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mboard
+Group=mboard
+WorkingDirectory=/opt/mboard
+EnvironmentFile=/opt/mboard/.env
+ExecStart=/opt/mboard-runtime/bun/bun src/server/server.ts
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=-/www/wwwroot/panel.example/.env -/opt/mboard-backups
+ReadWritePaths=/opt/mboard/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
