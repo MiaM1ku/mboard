@@ -1,0 +1,17 @@
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+credentials*.json
+*.credentials.json
+playwright-report/
+test-results/
+coverage/
