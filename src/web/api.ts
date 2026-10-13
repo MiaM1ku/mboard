@@ -82,4 +82,26 @@ export function formatDate(s?: string | null) {
         hour12: false,
       }).format(d);
 }
+export function subscriptionUrl(user: {
+  subscription_token: string;
+  subscription_url?: string;
+}) {
+  if (user.subscription_url) {
+    try {
+      const value = new URL(user.subscription_url);
+      if (
+        ["http:", "https:"].includes(value.protocol) &&
+        !value.username &&
+        !value.password
+      )
+        return value.href;
+    } catch {
+      /* Fall through to same-origin development links. */
+    }
+  }
+  return new URL(
+    `/s/${encodeURIComponent(user.subscription_token)}`,
+    window.location.origin,
+  ).href;
+}
 export const jsonBody = (value: unknown) => JSON.stringify(value);

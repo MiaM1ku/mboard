@@ -2,6 +2,11 @@
 
 Independent implementation. Bun HTTP + SQLite; browser UI uses relative same-origin URLs. All `/api` replies use `{data: value}`; errors `{error: {code, message}}`, appropriate HTTP status. `/s/:token` is a content download and returns a raw sing-box JSON configuration (no data envelope). Field names snake_case. All byte counters are integer bytes. Times are ISO 8601 UTC strings or null. No Xboard runtime dependencies. A migration tool reads an offline JSON export.
 
+## Host-separated subscription origin
+Set `MBOARD_PUBLIC_ORIGIN` to the panel origin and `MBOARD_SUBSCRIPTION_ORIGIN` to a distinct subscription origin. The same HTTP listener classifies the actual `Host` header (URL authority fallback when absent). Exact normalized panel/loopback hostnames serve the app; the subscription hostname serves `GET` and `HEAD /s/:64hex-token`. Other routes/methods and unknown hostnames return 404. Domain selection ignores forwarded-host headers. Without a subscription origin the previous single-origin behavior remains available.
+
+Owner User views include `subscription_url` when an origin is configured. That URL comes from trusted subscription/panel configuration, not request Host. Admin user lists redact token and URL. Subscription responses use `Content-Disposition: attachment; filename="mboard.json"`. Panel-domain subscription paths keep supporting existing links. The reverse proxy passes the original Host to the existing port.
+
 ## Public site
 - `GET /api/v1/site` -> `{site_name:string,site_description:string}`; no session required, no private settings.
 
@@ -12,7 +17,7 @@ Independent implementation. Bun HTTP + SQLite; browser UI uses relative same-ori
 - `POST /api/v1/auth/logout` -> `{ok:true}`.
 - `GET /api/v1/me` -> User.
 - `PATCH /api/v1/me/password` `{current_password,new_password}` -> `{ok:true}`; revoke other sessions.
-User = `{id:number,email,name,role:'admin'|'user',enabled:boolean,created_at,upload_bytes:number,download_bytes:number,quota_bytes:number,expires_at:string|null,subscription_token:string}`. Auth/me returns own subscription token; admin list should redact token.
+User = `{id:number,email,name,role:'admin'|'user',enabled:boolean,created_at,upload_bytes:number,download_bytes:number,quota_bytes:number,expires_at:string|null,subscription_token:string,subscription_url?:string}`. Auth/me returns own subscription token; admin list should redact token.
 
 ## User
 - `GET /api/v1/overview` -> `{user:User,nodes:Node[],traffic:TrafficPoint[],notices:Notice[]}`. Node list matches enabled group grants.
@@ -24,8 +29,8 @@ User = `{id:number,email,name,role:'admin'|'user',enabled:boolean,created_at,upl
 - `POST /api/v1/tickets` `{subject,body}` -> Ticket.
 - `POST /api/v1/tickets/:id/messages` `{body}` -> Ticket.
 - `PATCH /api/v1/tickets/:id` `{status:'closed'}` -> Ticket.
-- `POST /api/v1/me/subscription/rotate` -> `{subscription_token}`.
-- `GET /s/:token` -> sing-box client JSON config. Authorized enabled nodes only. Client config uses independently generated UUID credentials and includes selector + urltest + direct. Subscription supports protocol selected in node, real configured endpoint and TLS.
+- `POST /api/v1/me/subscription/rotate` -> `{subscription_token,subscription_url?:string}`.
+- `GET /s/:token` -> sing-box client JSON config. `HEAD` applies the same authorization checks and sends the corresponding headers. Authorized enabled nodes only. Client config uses independently generated UUID credentials and includes selector + urltest + direct. Subscription supports protocol selected in node, real configured endpoint and TLS.
 
 ## Admin
 - `GET /api/v1/admin/overview` -> `{users:number,enabled_users:number,nodes:number,online_nodes:number,machines:number,online_machines:number,upload_bytes:number,download_bytes:number,traffic:TrafficPoint[],recent_machines:Machine[]}`.

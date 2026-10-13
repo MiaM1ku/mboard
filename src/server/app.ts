@@ -1,9 +1,37 @@
 import { openDatabase, hash, secret } from './database';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, extname } from 'node:path';
+import { isIP } from 'node:net';
+
+// Parse an authority, not a URL: URL parsers silently repair several invalid Host values.
+function hostName(authority: string): string | undefined {
+  if (!authority || /[\s\x00-\x1f\x7f,@/\\?#%]/.test(authority)) return undefined;
+  const match = authority.startsWith('[') ? authority.match(/^(\[[^\]]+\])(?::(\d+))?$/) : authority.match(/^([^:]+)(?::(\d+))?$/);
+  if (!match || (match[2] !== undefined && (Number(match[2]) < 1 || Number(match[2]) > 65535))) return undefined;
+  let name = match[1].toLowerCase();
+  if (name.startsWith('[')) {
+    if (isIP(name.slice(1, -1)) !== 6) return undefined;
+    return new URL(`http://${name}`).hostname;
+  }
+  if (name.endsWith('.')) name = name.slice(0, -1);
+  if (name.length > 253 || !name.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return undefined;
+  // Do not let URL's legacy numeric-address normalization make a fake loopback host trusted.
+  if (/^[\d.]+$/.test(name) && isIP(name) !== 4) return undefined;
+  return name;
+}
+function configuredOrigin(value: string, label: string): string {
+  const message = `${label} must be one HTTP(S) origin without credentials, path, query or fragment`;
+  const match = value.match(/^https?:\/\/([^/]+)\/?$/i);
+  if (!match || !hostName(match[1])) throw new Error(message);
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error(message); }
+  if (hostName(url.host) !== hostName(match[1])) throw new Error(message);
+  url.hostname = hostName(match[1])!;
+  return url.origin;
+}
 
 type Row = Record<string, any>;
-export interface AppOptions { dbPath?: string; distDir?: string; now?: () => Date; sessionSeconds?: number; loginLimit?: number; peerLoginLimit?: number; trustProxy?: boolean; initializeRuntime?: boolean; publicOrigin?: string }
+export interface AppOptions { dbPath?: string; distDir?: string; now?: () => Date; sessionSeconds?: number; loginLimit?: number; peerLoginLimit?: number; trustProxy?: boolean; initializeRuntime?: boolean; publicOrigin?: string; subscriptionOrigin?: string }
 class ApiError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 function fail(status: number, code: string, message: string): never { throw new ApiError(status, code, message); }
 const string = (v: unknown, label: string, max = 200, min = 1): string => {
@@ -28,12 +56,22 @@ const verifyPassword = (plain: string, digest: string) => Bun.password.verify(
 const pick = (body: Row, fields: string[]) => { for (const k of Object.keys(body)) if (!fields.includes(k)) fail(400, 'VALIDATION', `请检查字段：${k.slice(0, 40)}`); };
 
 export function createApp(options: AppOptions = {}) {
-  let publicOrigin: string | undefined;
-  if (options.publicOrigin !== undefined) {
-    const origin = new URL(options.publicOrigin);
-    if (!['http:','https:'].includes(origin.protocol) || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('MBOARD_PUBLIC_ORIGIN must be one HTTP(S) origin without credentials, path, query or fragment');
-    publicOrigin = origin.origin;
-  }
+  const publicOrigin = options.publicOrigin === undefined ? undefined : configuredOrigin(options.publicOrigin, 'MBOARD_PUBLIC_ORIGIN');
+  const subscriptionOrigin = options.subscriptionOrigin === undefined ? undefined : configuredOrigin(options.subscriptionOrigin, 'MBOARD_SUBSCRIPTION_ORIGIN');
+  const panelHost = publicOrigin && hostName(new URL(publicOrigin).host);
+  const subscriptionHost = subscriptionOrigin && hostName(new URL(subscriptionOrigin).host);
+  if (subscriptionOrigin && !publicOrigin) throw new Error('MBOARD_SUBSCRIPTION_ORIGIN requires MBOARD_PUBLIC_ORIGIN');
+  if (subscriptionHost && subscriptionHost === panelHost) throw new Error('MBOARD_SUBSCRIPTION_ORIGIN must have a different hostname from MBOARD_PUBLIC_ORIGIN');
+  const subscriptionURL = (token: string) => (subscriptionOrigin ?? publicOrigin) ? `${subscriptionOrigin ?? publicOrigin}/s/${token}` : undefined;
+  const hostBoundary = (req: Request) => {
+    if (!subscriptionHost) return;
+    const url = new URL(req.url);
+    const host = hostName(req.headers.get('host') ?? url.host);
+    if (host === subscriptionHost) {
+      if (['GET', 'HEAD'].includes(req.method.toUpperCase()) && /^\/s\/[a-f0-9]{64}$/.test(url.pathname)) return;
+    } else if (host && (host === panelHost || ['localhost', '127.0.0.1', '[::1]'].includes(host))) return;
+    fail(404, 'NOT_FOUND', '此地址提供订阅下载，请使用有效的订阅链接');
+  };
   const accountLimit = options.loginLimit ?? 10, peerLimit = options.peerLoginLimit ?? 200;
   for (const value of [accountLimit,peerLimit]) if (!Number.isSafeInteger(value) || value < 1 || value > 1000000) throw new Error('Login limits must be integers from 1 to 1000000');
   const db = openDatabase(options.dbPath);
@@ -51,6 +89,7 @@ export function createApp(options: AppOptions = {}) {
   const userView = (u: Row, admin = false): Row => {
     const v: Row = { id: u.id, email: u.email, name: u.name, role: u.role, enabled: !!u.enabled, created_at: u.created_at, upload_bytes: u.upload_bytes, download_bytes: u.download_bytes, quota_bytes: u.quota_bytes, expires_at: u.expires_at, subscription_token: admin ? '' : u.subscription_token };
     if (admin) v.group_ids = groupsFor('user', u.id);
+    else if (subscriptionURL(u.subscription_token)) v.subscription_url = subscriptionURL(u.subscription_token);
     return v;
   };
   const online = (m: Row | null) => !!m?.enabled && !!m.last_seen_at && now().getTime() - Date.parse(m.last_seen_at) < 90_000;
@@ -230,11 +269,16 @@ export function createApp(options: AppOptions = {}) {
       return json(userView(fresh), 200, newSession(req, u.id));
     }
     if (path === '/api/v1/auth/logout' && method === 'POST') { run('DELETE FROM sessions WHERE token_hash=?', sessionHash(req)); return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie(req, '', 0) }); }
-    if (path.startsWith('/s/') && method === 'GET') {
+    if (path.startsWith('/s/') && ['GET', 'HEAD'].includes(method)) {
       const token = path.slice(3); const u = /^[a-f0-9]{64}$/.test(token) ? get('SELECT * FROM users WHERE subscription_token=?', token) : null;
       if (!u) fail(404, 'NOT_FOUND', '请确认订阅链接');
       if (!active(u)) fail(403, 'SUBSCRIPTION_UNAVAILABLE', '订阅待恢复，请确认账号状态、到期时间和流量额度');
-      return Response.json(clientConfig(u));
+      const config = JSON.stringify(clientConfig(u));
+      return new Response(method === 'HEAD' ? null : config, { headers: {
+        'Content-Type': 'application/json;charset=utf-8',
+        'Content-Length': String(new TextEncoder().encode(config).byteLength),
+        'Content-Disposition': 'attachment; filename="mboard.json"',
+      } });
     }
     if (!path.startsWith('/api/')) return staticResponse(req, options.distDir);
     const u = authenticated(req)!;
@@ -251,7 +295,7 @@ export function createApp(options: AppOptions = {}) {
       return json({ ok: true });
     }
     if (path === '/api/v1/me/subscription/rotate' && method === 'POST') {
-      const token = secret(); atomic(() => { run('UPDATE users SET subscription_token=?,credential=? WHERE id=?', token, crypto.randomUUID(), u.id); bump(); audit(u, 'subscription.rotate', u.id); }); return json({ subscription_token: token });
+      const token = secret(); atomic(() => { run('UPDATE users SET subscription_token=?,credential=? WHERE id=?', token, crypto.randomUUID(), u.id); bump(); audit(u, 'subscription.rotate', u.id); }); return json({ subscription_token: token, ...(subscriptionURL(token) ? { subscription_url: subscriptionURL(token) } : {}) });
     }
     if (path === '/api/v1/nodes' && method === 'GET') return json(authorizedNodes(u).map(nodeView));
     if (path === '/api/v1/traffic' && method === 'GET') { const raw = url.searchParams.get('days') ?? '30'; if (!/^\d+$/.test(raw)) fail(400, 'VALIDATION', '请填写 1 到 366 天的范围'); return json(traffic(u.id, integer(Number(raw), '天数', 1, 366))); }
@@ -383,6 +427,7 @@ export function createApp(options: AppOptions = {}) {
   async function fetch(req: Request, context?: { requestIP?: (req: Request) => { address: string } | null } | string) {
     let response: Response;
     try {
+      hostBoundary(req);
       // Expiry changes time-dependent membership even when no writes occur. Advance revisions once per newly crossed expiry.
       const current = now().getTime();
       if (current > lastExpiryScan) {
@@ -395,6 +440,12 @@ export function createApp(options: AppOptions = {}) {
       else if (String(error).includes('UNIQUE constraint failed')) response = Response.json({error:{code:'CONFLICT',message:'这条记录或端口已存在，请选择其他值'}},{status:409});
       else if (String(error).includes('FOREIGN KEY constraint failed')) response = Response.json({error:{code:'IN_USE',message:'这条记录还有关联内容，请先处理关联'}},{status:409});
       else { console.error('mboard request failure:', error instanceof Error ? error.name : 'UnknownError'); response = Response.json({error:{code:'INTERNAL',message:'操作待完成，请稍后重试'}},{status:500}); }
+    }
+    if (req.method.toUpperCase() === 'HEAD' && response.body) {
+      const headers = new Headers(response.headers);
+      const bytes = await response.arrayBuffer();
+      if (!headers.has('Content-Length')) headers.set('Content-Length', String(bytes.byteLength));
+      response = new Response(null, { status: response.status, statusText: response.statusText, headers });
     }
     if (response.status === 413) response.headers.set('Connection','close');
     response.headers.set('Cache-Control','no-store');

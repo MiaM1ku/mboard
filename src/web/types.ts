@@ -10,6 +10,7 @@ export interface User {
   quota_bytes: number;
   expires_at: string | null;
   subscription_token: string;
+  subscription_url?: string;
   group_ids?: number[];
 }
 export interface Group {

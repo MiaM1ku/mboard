@@ -58,7 +58,8 @@ bun run dev:web
 | MBOARD_HOST | 127.0.0.1 | HTTP 监听地址 |
 | MBOARD_PORT | 8787 | HTTP 端口 |
 | MBOARD_DATA_DIR | ./data | SQLite 数据目录 |
-| MBOARD_PUBLIC_ORIGIN | 请求自身 origin | 公开访问 origin，如 https://panel.example.com |
+| MBOARD_PUBLIC_ORIGIN | 请求自身 origin | 面板公开访问 origin，如 https://panel.example.com |
+| MBOARD_SUBSCRIPTION_ORIGIN | 可选 | 独立订阅 origin，同一端口按 Host 分流，提供订阅 GET 和 HEAD |
 | MBOARD_LOGIN_LIMIT | 10 | 每个账号和连接来源在 15 分钟内的登录尝试数 |
 | MBOARD_PEER_LOGIN_LIMIT | 200 | 每个连接来源在 15 分钟内的总尝试数 |
 

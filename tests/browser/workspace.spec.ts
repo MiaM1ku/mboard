@@ -439,6 +439,52 @@ test("管理端 CRUD、一次性令牌和站点展示", async ({ page }) => {
     await invariant(page);
   }
 });
+test("订阅专用域名链接和跨域下载", async ({ page, context }) => {
+  await login(page);
+  const subscriptionOrigin = "https://subscription.example.test";
+  let expected = "";
+  for (const path of ["auth/status", "overview"])
+    await page.route(`**/api/v1/${path}`, async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      const user = payload.data.user;
+      if (user) {
+        user.subscription_url = `${subscriptionOrigin}/s/${user.subscription_token}`;
+        expected = user.subscription_url;
+      }
+      await route.fulfill({ response, json: payload });
+    });
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin,
+  });
+  await page.goto("/#/user/overview");
+  await expect(page.locator("a[download]").first()).toHaveAttribute(
+    "href",
+    new RegExp("^https://subscription\\.example\\.test/s/"),
+  );
+  await page.getByRole("button", { name: "复制订阅链接" }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(expected);
+  await page.route(`${subscriptionOrigin}/s/*`, async (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Content-Disposition": 'attachment; filename="mboard.json"' },
+      body: JSON.stringify({ outbounds: [{ type: "direct", tag: "direct" }] }),
+    }),
+  );
+  const download = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载配置" }).click();
+  expect((await download).suggestedFilename()).toBe("mboard.json");
+  await page.goto("/#/user/account");
+  await expect(page.getByLabel("订阅链接", { exact: true })).toHaveValue(
+    expected,
+  );
+  await expect(page.locator("a[download]")).toHaveAttribute("href", expected);
+  await invariant(page);
+});
+
 test("移动导航和对话框键盘操作", async ({ page }) => {
   await login(page);
   await page.setViewportSize({ width: 390, height: 844 });

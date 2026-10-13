@@ -15,7 +15,13 @@ import {
   Signal,
   SlidersHorizontal,
 } from "lucide-react";
-import { api, formatBytes, formatDate, useResource } from "./api";
+import {
+  api,
+  formatBytes,
+  formatDate,
+  useResource,
+  subscriptionUrl,
+} from "./api";
 import type {
   Node,
   Overview,
@@ -89,9 +95,7 @@ function Home({ onNavigate }: { onNavigate: (s: string) => void }) {
   async function copy() {
     if (!resource.data) return;
     try {
-      await navigator.clipboard.writeText(
-        `${location.origin}/s/${resource.data.user.subscription_token}`,
-      );
+      await navigator.clipboard.writeText(subscriptionUrl(resource.data.user));
       setCopied(true);
       notify("订阅链接已经复制。");
     } catch {
@@ -164,7 +168,7 @@ function Home({ onNavigate }: { onNavigate: (s: string) => void }) {
                   </Button>
                   <a
                     className="button button-secondary"
-                    href={`/s/${u.subscription_token}`}
+                    href={subscriptionUrl(u)}
                     download="mboard.json"
                   >
                     <Download size={16} />
@@ -783,9 +787,7 @@ function Account({
   }
   async function copy() {
     try {
-      await navigator.clipboard.writeText(
-        `${location.origin}/s/${user.subscription_token}`,
-      );
+      await navigator.clipboard.writeText(subscriptionUrl(user));
       notify("订阅链接已经复制。");
     } catch {
       notify("请选择下方链接后复制。", "danger");
@@ -850,7 +852,7 @@ function Account({
               <Field label="订阅链接">
                 <Input
                   readOnly
-                  value={`${location.origin}/s/${user.subscription_token}`}
+                  value={subscriptionUrl(user)}
                   onFocus={(e) => e.target.select()}
                 />
               </Field>
@@ -860,7 +862,7 @@ function Account({
                   复制链接
                 </Button>
                 <a
-                  href={`/s/${user.subscription_token}`}
+                  href={subscriptionUrl(user)}
                   download="mboard.json"
                   className="button button-secondary"
                 >
