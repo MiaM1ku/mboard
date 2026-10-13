@@ -38,6 +38,26 @@ const synthetic = {
   surfboard: customIni,
 } satisfies Record<TemplateName, string>;
 
+test('Clash Meta optional dialer binds only dynamic exits and keeps front selection static',()=>{
+ const fronts=Array.from({length:5},(_,i)=>({name:`国内前置${i+1}`,type:'http',server:`192.0.2.${i+1}`,port:443,tls:false,udp:false,headers:{Host:'cdn.example.test','X-Test-Auth':'synthetic-private','User-Agent':'synthetic-agent'}}));
+ const source=JSON.stringify({proxies:fronts,'x-mboard-dialer-proxy':'国内前置','proxy-groups':[{name:'国内前置',type:'select','default-selected':'DIRECT',proxies:['DIRECT',...fronts.map(f=>f.name)]},{name:'大流量',type:'select',filter:'US|JP',proxies:['$proxy_group']}],rules:['MATCH,大流量']});
+ const saved=template('clashmeta',source),r=renderSubscription(saved,[endpoint({name:'US Exit'}),endpoint({id:2,name:'HK Exit'})]),cfg=parse(r.content);
+ expect(cfg.proxies).toHaveLength(7);expect(cfg['x-mboard-dialer-proxy']).toBeUndefined();expect(cfg['proxy-groups'][0].proxies).toEqual(['DIRECT',...fronts.map(f=>f.name)]);expect(cfg['proxy-groups'][0]['default-selected']).toBe('DIRECT');expect(cfg['proxy-groups'][1].proxies).toEqual(['US Exit']);
+ expect(cfg.proxies.slice(0,5)).toEqual(fronts);for(const p of cfg.proxies.slice(5))expect(p['dialer-proxy']).toBe('国内前置');for(const p of cfg.proxies.slice(0,5))expect(p['dialer-proxy']).toBeUndefined();expect(r.node_count).toBe(2);expect(saved.content).toBe(source);
+});
+
+test('dialer validation rejects loops, missing/ambiguous members and header injection without echoing credentials',()=>{
+ const base={proxies:[{name:'front',type:'http',server:'192.0.2.1',port:443,headers:{Host:'cdn.example.test'}}],'x-mboard-dialer-proxy':'前置','proxy-groups':[{name:'前置',type:'select',proxies:['DIRECT','front']}],rules:['MATCH,前置']};
+ for(const patch of [{...base,'x-mboard-dialer-proxy':'missing'},{...base,'proxy-groups':[{name:'前置',type:'select',proxies:['前置']}]},{...base,'proxy-groups':[{name:'前置',type:'select',proxies:['$proxy_group']}]},{...base,proxies:[{...base.proxies[0],'dialer-proxy':'前置'}]},{...base,proxies:[{...base.proxies[0],headers:{Host:'private-secret\r\nInjected: x'}}]}]){const content=JSON.stringify(patch),validation=validateTemplate('clashmeta',content);expect(validation.valid).toBe(false);expect(JSON.stringify(validation)).not.toContain('private-secret');expect(()=>renderSubscription(template('clashmeta',content),[endpoint()])).toThrow(TemplateValidationError)}
+ expect(validateTemplate('stash',JSON.stringify(base)).valid).toBe(false);
+});
+
+test('dialer-free formats stay unchanged and nested static dialer groups never receive exits',()=>{
+ const source=JSON.stringify({proxies:[{name:'front',type:'http',server:'192.0.2.1',port:443}],'x-mboard-dialer-proxy':'前置','proxy-groups':[{name:'前置',type:'select',proxies:['DIRECT','子前置']},{name:'子前置',type:'select',proxies:['front']},{name:'出口',type:'select',proxies:[]}],rules:['MATCH,出口']});
+ const cfg=parse(renderSubscription(template('clashmeta',source),[endpoint({name:'JP exit'})]).content);expect(cfg['proxy-groups'][0].proxies).toEqual(['DIRECT','子前置']);expect(cfg['proxy-groups'][1].proxies).toEqual(['front']);expect(cfg['proxy-groups'][2].proxies).toEqual(['JP exit']);
+ for(const name of ['clash','clashmeta','stash']as const){const cfg=parse(renderSubscription(template(name),[endpoint()]).content);for(const p of cfg.proxies)expect(p['dialer-proxy']).toBeUndefined()}
+});
+
 test('YAML group filter materializes only matching nodes and keeps HK separate from bulk download', () => {
   const filter='(?i)🇸🇬|🇯🇵|🇺🇸|SG|JP|US|Starhub|Sony|LightSail|Akko|Bitsflow|DMIT|新加坡|日本|美国';
   const content='# preserve exact template\nproxies: []\nproxy-groups:\n  - name: 大流量下载\n    type: url-test\n    filter: "'+filter+'"\n    exclude-type: trusttunnel\n    url: https://probe.example.test/204\n  - {name: HK自动, type: url-test, filter: "(?i)🇭🇰|港|HK"}\nrules: ["MATCH,大流量下载"]\n';

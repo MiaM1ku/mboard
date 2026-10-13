@@ -97,6 +97,28 @@ function position(content: string, offset: number) {
   const prefix = content.slice(0, Math.max(0, offset));
   return { line: prefix.split('\n').length, column: prefix.length - prefix.lastIndexOf('\n') };
 }
+function clashMetaDialer(root: Record<string, any>, name: TemplateName): { name: string; groups: Set<string> } | null {
+  const target=root['x-mboard-dialer-proxy'];
+  if(target===undefined)return null;
+  if(name!=='clashmeta'||typeof target!=='string'||!target||target.length>200||/[\r\n\0]/.test(target))throw issue('请在 Clash Meta 模板中指定有效的前置选择组。');
+  const groups=new Map<string,any>(root['proxy-groups'].map((g:any)=>[g.name,g])),proxies=new Map<string,any>(root.proxies.map((p:any)=>[p.name,p]));
+  if(!groups.has(target)||proxies.has(target))throw issue('请为前置拨号指定独立的代理选择组。');
+  const visited=new Set<string>(),active=new Set<string>();
+  const visit=(key:string)=>{
+    if(active.has(key))throw issue('请调整前置分组，形成指向静态前置节点的单向链路。');
+    if(visited.has(key))return;
+    const g=groups.get(key);if(!g||g.type!=='select'||!g.proxies.length)throw issue('前置分组需要使用 select 和明确的成员列表。');
+    active.add(key);
+    for(const member of g.proxies){
+      if(member==='DIRECT')continue;
+      if(groups.has(member)){visit(member);continue;}
+      const p=proxies.get(member);if(!p||p['dialer-proxy']&&p['dialer-proxy']!=='DIRECT')throw issue('请使用模板中的独立静态节点作为前置成员。');
+      if(p.type==='http'&&p.headers!==undefined&&(!object(p.headers)||Object.entries(p.headers).some(([k,v])=>! /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(k)||typeof v!=='string'||v.length>4096||/[\r\n\0]/.test(v))))throw issue('请将前置请求头填写为单行名称和值。');
+    }
+    active.delete(key);visited.add(key);
+  };
+  visit(target);return{name:target,groups:visited};
+}
 function checkRoot(root: any, name: TemplateName): void {
   if (!object(root)) throw issue('模板顶层需要是一个配置对象。');
   if (name !== 'singbox') {
@@ -121,6 +143,7 @@ function checkRoot(root: any, name: TemplateName): void {
     const members = name === 'singbox' ? group.outbounds : group.proxies;
     if (typeof (name === 'singbox' ? group.tag : group.name) !== 'string' || !Array.isArray(members) || members.some((v: any) => typeof v !== 'string')) throw issue('分组需要有名称和字符串成员数组。');
   }
+  if(name!=='singbox')clashMetaDialer(root,name);
 }
 function jsonConfig(content: string): Record<string, any> {
   try { return JSON.parse(content); } catch (error) {
@@ -501,7 +524,7 @@ function fillSingbox(root: Record<string, any>, generated: Record<string, any>[]
   }
   root.outbounds.push(...generated);
 }
-function fillYaml(root: Record<string, any>, generated: Record<string, any>[], names: string[], warnings: string[]) {
+function fillYaml(root: Record<string, any>, generated: Record<string, any>[], names: string[], warnings: string[], fixedGroups: Set<string> = new Set()) {
   root.proxies.push(...generated);
   const canonicalType = (type: unknown) => {
     const value = String(type || '').toLowerCase().replace(/[-_\s]/g, '');
@@ -509,6 +532,7 @@ function fillYaml(root: Record<string, any>, generated: Record<string, any>[], n
   };
   const types = new Map<string, string>(root.proxies.map((proxy: any) => [proxy.name, canonicalType(proxy.type)]));
   for (const group of root['proxy-groups']) {
+    if(fixedGroups.has(group.name))continue;
     let chosen = names;
     // We materialize generated names into proxies; native provider filters alone
     // do not filter this explicit list. Apply the saved selector before expansion.
@@ -661,7 +685,9 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
     content = JSON.stringify(root, null, 2) + '\n';
   } else if (root && doc) {
     const generated = permitted.map(yamlOutbound);
-    fillYaml(root, generated, names, warnings);
+    const dialer=clashMetaDialer(root,name);
+    if(dialer){for(const proxy of generated)proxy['dialer-proxy']=dialer.name;delete root['x-mboard-dialer-proxy'];doc.delete('x-mboard-dialer-proxy');}
+    fillYaml(root, generated, names, warnings, dialer?.groups);
     // Mutate dynamic arrays in place: replacing their parent key would orphan user aliases.
     const removedAnchors = new Map<string, unknown>();
     const replaceSequence = (parent: Document | ReturnType<Document['createNode']>, key: string, oldNode: unknown, values: unknown[]) => {
