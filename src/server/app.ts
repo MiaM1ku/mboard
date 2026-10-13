@@ -2,7 +2,8 @@ import { openDatabase, hash, secret } from './database';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, extname } from 'node:path';
 import { isIP } from 'node:net';
-import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, RuntimeCompileError } from './runtime';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, RuntimeCompileError } from './runtime';
 import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, selectSubscriptionFormat, TemplateValidationError, type SubscriptionEndpoint } from './subscriptions';
 
 // Parse an authority, not a URL: URL parsers silently repair several invalid Host values.
@@ -225,9 +226,28 @@ export function createApp(options: AppOptions = {}) {
       if (req.headers.get('cookie')?.includes('mboard_session=')) fail(401, 'NODE_AUTH', '请使用机器令牌连接');
       const bearer = req.headers.get('authorization');
       if (!bearer || !/^Bearer [a-f0-9]{64}$/.test(bearer)) fail(401, 'NODE_AUTH', '请使用有效的机器令牌');
+      if(path==='/api/node/v1/enroll'&&method==='POST'){
+        const b=await body(req);pick(b,['machine_id']);const mid=integer(b.machine_id,'机器 ID',1);const supplied=bearer.slice(7);const current=authenticateRuntimeMachine(db,supplied);let token=supplied;
+        if(current!==mid){
+          const archived=get('SELECT payload FROM legacy_records WHERE kind=? AND id=?','v2_server_machine',String(mid));let legacy:Row;try{legacy=JSON.parse(archived?.payload||'{}')}catch{fail(401,'NODE_AUTH','请用这台机器的原接入凭据执行迁移')}
+          const expected=hash(String(legacy.token||'')),actual=hash(supplied);if(!legacy.token||!timingSafeEqual(Buffer.from(expected),Buffer.from(actual)))fail(401,'NODE_AUTH','请用这台机器的原接入凭据执行迁移');
+          atomic(()=>{const machine=requireRow('runtime_machines',mid);if(machine.state!=='pending')fail(409,'NODE_ENROLLED','这台机器已接入，请使用新的节点配置');compileMachine(db,mid);
+            let key=get('SELECT value FROM runtime_metadata WHERE key=?','enrollment:secret')?.value;if(!key){key=secret();run('INSERT INTO runtime_metadata(key,value) VALUES(?,?)','enrollment:secret',key)}
+            token=createHmac('sha256',key).update(`mboard-node-enrollment:v1:${mid}:${supplied}`).digest('hex');const prior=get('SELECT value FROM runtime_metadata WHERE key=?',`machine:${mid}:enrollment`);
+            if(prior&&machine.token_hash!==hash(token))fail(409,'NODE_CREDENTIAL_CHANGED','机器令牌已更新，请使用面板签发的新凭据');
+            run('UPDATE runtime_machines SET token_hash=? WHERE id=?',hash(token),mid);run('INSERT OR IGNORE INTO runtime_metadata(key,value) VALUES(?,?)',`machine:${mid}:enrollment`,stamp());
+          });
+        }
+        const c=compileMachine(db,mid);return json({token,revision:c.revision,config:c.config,traffic_labels:c.traffic_labels,files:c.files});
+      }
       const runtimeID=authenticateRuntimeMachine(db,bearer.slice(7));
       if(runtimeID!==null){
         const stillAuthenticated=()=>{if(authenticateRuntimeMachine(db,bearer.slice(7))!==runtimeID)fail(401,'NODE_AUTH','机器凭据更新后请重新接入')};
+        if(path==='/api/node/v1/activate'&&method==='POST'){
+          const b=await body(req);pick(b,['config_revision']);stillAuthenticated();const revision=integer(b.config_revision,'配置版本',1);const state=requireRow('runtime_machines',runtimeID);
+          if(!state.last_seen_at||now().getTime()-Date.parse(state.last_seen_at)>90000||state.applied_revision!==revision||!state.core_ready||!state.telemetry_ready)fail(409,'NODE_READY','请等待核心和流量采集就绪后激活');
+          activateMachine(db,runtimeID,{verified:true,appliedRevision:revision,coreReady:true,telemetryReady:true});return json({activated:true,machine_id:runtimeID,config_revision:revision});
+        }
         if(path==='/api/node/v1/config'&&method==='GET'){const c=compileMachine(db,runtimeID);return json({revision:c.revision,config:c.config,traffic_labels:c.traffic_labels})}
         if(path==='/api/node/v1/heartbeat'&&method==='POST'){
           const b=await body(req);pick(b,['version','uptime_seconds','config_revision','core_ready','telemetry_ready']);stillAuthenticated();string(b.version,'节点版本',100);integer(b.uptime_seconds,'运行秒数');integer(b.config_revision,'配置版本');for(const k of ['core_ready','telemetry_ready'])if(b[k]!==undefined)boolean(b[k],k);
@@ -353,7 +373,7 @@ export function createApp(options: AppOptions = {}) {
       return json({ ok: true });
     }
     if (path === '/api/v1/me/subscription/rotate' && method === 'POST') {
-      const token = secret(); atomic(() => { run('UPDATE users SET subscription_token=?,credential=? WHERE id=?', token, crypto.randomUUID(), u.id); bump(); audit(u, 'subscription.rotate', u.id); }); return json({ subscription_token: token, ...(subscriptionURL(token) ? { subscription_url: subscriptionURL(token) } : {}) });
+      const token = secret(); atomic(() => { const credential=crypto.randomUUID();run('UPDATE users SET subscription_token=?,credential=? WHERE id=?', token, credential, u.id);rotateRuntimeIdentities(db,u.id,credential);bump(); audit(u, 'subscription.rotate', u.id); }); return json({ subscription_token: token, ...(subscriptionURL(token) ? { subscription_url: subscriptionURL(token) } : {}) });
     }
     if (path === '/api/v1/nodes' && method === 'GET') return json(userNodes(u));
     if (path === '/api/v1/traffic' && method === 'GET') { const raw = url.searchParams.get('days') ?? '30'; if (!/^\d+$/.test(raw)) fail(400, 'VALIDATION', '请填写 1 到 366 天的范围'); return json(traffic(u.id, integer(Number(raw), '天数', 1, 366))); }
@@ -400,6 +420,7 @@ export function createApp(options: AppOptions = {}) {
         const records = (kind: string) => all('SELECT id,payload FROM legacy_records WHERE kind=? ORDER BY id', kind).map(r => ({ archiveId: r.id, row: JSON.parse(r.payload) as Row }));
         const safeId = (v: unknown): number | null => /^(?:[1-9]\d*)$/.test(String(v)) && Number.isSafeInteger(Number(v)) ? Number(v) : null;
         const display = (v: unknown, fallback: string, max = 253) => typeof v === 'string' && v.length <= max && !/[\x00-\x1f\x7f]/.test(v) ? v : fallback;
+        const liveNodes=new Map(runtimeNodes().map(n=>[n.id,n])),liveMachines=new Map(runtimeMachines().map(m=>[m.id,m]));
         const nodes = records('v2_server').map(({ archiveId, row: r }) => {
           let gids: unknown = r.group_ids;
           if (typeof gids === 'string') { try { gids = JSON.parse(gids); } catch { gids = []; } }
@@ -411,9 +432,9 @@ export function createApp(options: AppOptions = {}) {
             port: safeId(r.port) && Number(r.port) <= 65535 ? Number(r.port) : null,
             parent_id: safeId(r.parent_id), machine_id: safeId(r.machine_id),
             group_ids: Array.isArray(gids) ? [...new Set(gids.map(safeId).filter((id): id is number => id !== null))] : [],
-            state: 'pending', note: '原配置已经归档。逐台接入后可恢复这个节点。' };
+            state: liveNodes.get(Number(r.id))?.online?'active':'pending', note: liveNodes.get(Number(r.id))?.online?'完整配置已恢复，机器心跳和代理核心正常。':'原配置已经归档。逐台接入后可恢复这个节点。' };
         });
-        const machines = records('v2_server_machine').map(({ archiveId, row: r }) => ({ id: safeId(r.id) ?? archiveId, name: display(r.name, `机器 ${archiveId}`, 200), state: 'pending' }));
+        const machines = records('v2_server_machine').map(({ archiveId, row: r }) => ({ id: safeId(r.id) ?? archiveId, name: display(r.name, `机器 ${archiveId}`, 200), state: liveMachines.get(Number(r.id))?.online?'active':'pending' }));
         const imported = get('SELECT created_at FROM import_runs ORDER BY created_at DESC LIMIT 1');
         const count = (kind: string) => get('SELECT COUNT(*) count FROM legacy_records WHERE kind=?', kind)!.count;
         return json({ summary: { users: count('v2_user'), nodes: nodes.length, machines: machines.length, groups: count('v2_server_group'), imported_at: imported?.created_at ?? null }, nodes, machines });
@@ -486,6 +507,7 @@ export function createApp(options: AppOptions = {}) {
             else savedId = Number(run(`INSERT INTO ${table}(${keys.join(',')}) VALUES(${keys.map(() => '?').join(',')})`, ...keys.map(k => fields[k])).lastInsertRowid);
             if (gids) setGroups(table === 'users' ? 'user' : 'node',savedId!,gids);
             if (table === 'users' && id && (digest || fields.enabled === 0)) run('DELETE FROM sessions WHERE user_id=?',id);
+            if (table==='users')ensureRuntimeIdentities(db,savedId!);
             if (['users','groups','nodes','machines'].includes(table)) bump(); audit(u,`${table}.${id ? 'update' : 'create'}`,savedId!);
             return requireRow(table,savedId!);
           });

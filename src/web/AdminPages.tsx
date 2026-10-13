@@ -67,7 +67,7 @@ type ImportedNode = {
   parent_id: number | null;
   machine_id: number | null;
   group_ids: number[];
-  state: "pending";
+  state: "pending" | "active";
   note: string;
 };
 type ImportedMachine = { id: number; name: string; state: "pending" };
@@ -297,7 +297,7 @@ function PendingImportPanel({
     summary.machines === 0 &&
     summary.groups === 0
   ) return null;
-  const pending = <Badge tone="warning">待接入</Badge>;
+  const progress=(state:string)=><Badge tone={state==='active'?'success':'warning'}>{state==='active'?'已接入运行':'待接入'}</Badge>;
   return (
     <Card>
       <div className="card-header mb-custom-toolbar">
@@ -349,7 +349,7 @@ function PendingImportPanel({
                   </>
                 ),
               },
-              { label: "接入进度", render: () => pending },
+              { label: "接入进度", render: (item) => progress(item.state) },
               {
                 label: "来源关联",
                 render: (node) => (
@@ -376,7 +376,7 @@ function PendingImportPanel({
           columns={[
             { label: "来源机器", render: (machine) => <strong>{machine.name}</strong> },
             { label: "来源 ID", render: (machine) => <span className="mono">#{machine.id}</span> },
-            { label: "接入进度", render: () => pending },
+            { label: "接入进度", render: (item) => progress(item.state) },
           ]}
         />
       ) : (

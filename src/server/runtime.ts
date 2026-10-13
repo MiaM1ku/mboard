@@ -90,6 +90,14 @@ export function restoreRuntime(db: Database, options: RestoreRuntimeOptions = {}
     return { nodes: ns.size, machines: (db.query('SELECT count(*) AS n FROM runtime_machines').get() as Row).n, bindings: (db.query('SELECT count(*) AS n FROM runtime_bindings').get() as Row).n, unmatched_bindings: unmatched, state: 'pending' as const };
   }).immediate();
 }
+export function ensureRuntimeIdentities(db:Database,userID?:number) {
+  const all=nodes(db),ns=new Map(all.map(n=>[Number(n.id),n]));
+  const users=db.query(userID===undefined?'SELECT id,credential FROM users':'SELECT id,credential FROM users WHERE id=?').all(...(userID===undefined?[]:[userID])) as Row[];
+  for(const u of users)for(const n of all){const root=rootFor(ns,n),base=rootCredential(db,u);persistIdentity(db,u.id,n.id,'',deriveEntry(base,n));for(const p of profiles(db,root))persistIdentity(db,u.id,n.id,profileID(p),deriveEntry(deriveUUID(base,'xboard-route-profile:v1:'+profileID(p).toLowerCase()),n));}
+}
+export function rotateRuntimeIdentities(db:Database,userID:number,credential:string) {
+  db.transaction(()=>{db.query('DELETE FROM runtime_identity_credentials WHERE user_id=?').run(userID);persistIdentity(db,userID,0,'',credential);ensureRuntimeIdentities(db,userID)}).immediate();
+}
 function persistIdentity(db: Database, uid: number, nid: number, pid: string, credential: string) { db.query('INSERT OR IGNORE INTO runtime_identity_credentials VALUES(?,?,?,?)').run(uid, nid, pid, credential); }
 function rootCredential(db: Database, user: Row): string { return (db.query('SELECT credential FROM runtime_identity_credentials WHERE user_id=? AND node_id=0 AND profile_id=?').get(user.id, '') as Row | null)?.credential || user.credential; }
 export function deriveUUID(base: string, domain: string) {

@@ -52,9 +52,9 @@ const FORMATS = [
   { name: "surfboard", label: "Surfboard" },
 ] as const;
 const sourceLabel = (source: string) => {
-  if (source === "legacy" || source === "imported") return "从旧模板恢复";
+  if (source === "legacy" || source === "imported" || source === "archive") return "从旧模板恢复";
   if (source === "builtin") return "内置默认模板";
-  if (source === "saved") return "已保存的模板";
+  if (source === "saved" || source === "custom") return "已保存的模板";
   return "站点模板";
 };
 const errorText = (error: unknown) =>
