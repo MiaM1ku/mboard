@@ -312,22 +312,22 @@ function iniOutbound(e: SubscriptionEndpoint, name: TemplateName): string {
   return `${iniToken(e.name)} = ${args.join(', ')}`;
 }
 function warn(warnings: string[], message: string) { if (!warnings.includes(message)) warnings.push(message); }
-function patternMatcher(pattern: string, warnings: string[], delimitedOnly = false): ((text: string) => boolean) | null {
+function patternMatcher(pattern: string, warnings: string[], delimitedOnly = false, invalidMatch = false): ((text: string) => boolean) | null {
   let source = pattern, flags = 'iu';
   const match = pattern.match(/^([/#~@%])(.*)\1([a-z]*)$/s);
   if (match) { source = match[2]!; flags = (match[3] || '').replace(/[uxs]/g, '') + 'u'; }
   else if (delimitedOnly) return null;
-  source = source.replace(/^\(\?i\)/, '');
+  if (source.startsWith('(?i)')) { flags += 'i'; source = source.slice(4); }
   // test() already searches anywhere; remove redundant outer wildcards before counting repetitions.
   source = source.replace(/^\^?\.\*/, '').replace(/\.\*\$?$/, '');
   const lexical = source.replace(/\\./g, '').replace(/\[(?:\\.|[^\]\\])*\]/g, '').replace(/\(\?:/g, '(');
   const repeats = lexical.match(/[+*?]|\{\d+(?:,\d*)?\}/g) || [];
   // At most one repetition ensures there are no overlapping repeat paths in the public renderer.
   if (source.length > 256 || repeats.length > 1 || /\\[1-9]|\(\?[=!<]|\)(?:[+*?]|\{)|\{\d{3,}/.test(source)) {
-    warn(warnings, '部分分组筛选表达式过于复杂，已经忽略。'); return () => false;
+    warn(warnings, '分组筛选表达式过于复杂，请简化后重试。'); return () => invalidMatch;
   }
   try { const re = new RegExp(source, [...new Set(flags.replace(/[gy]/g, ''))].join('')); return text => re.test(text.slice(0, 256)); }
-  catch { warn(warnings, '部分分组筛选表达式无效，已经忽略。'); return () => false; }
+  catch { warn(warnings, '请修正分组筛选表达式后重试。'); return () => invalidMatch; }
 }
 /** Render-time subset of https://sing-box.sagernet.org/migration/ (available since 1.12).
  * Work on the parsed render copy only. Unsupported semantics fail closed instead of deleting user rules.
@@ -503,16 +503,31 @@ function fillSingbox(root: Record<string, any>, generated: Record<string, any>[]
 }
 function fillYaml(root: Record<string, any>, generated: Record<string, any>[], names: string[], warnings: string[]) {
   root.proxies.push(...generated);
+  const canonicalType = (type: unknown) => {
+    const value = String(type || '').toLowerCase().replace(/[-_\s]/g, '');
+    return ({ ss: 'shadowsocks', ssr: 'shadowsocksr', socks5: 'socks' } as Record<string, string>)[value] || value;
+  };
+  const types = new Map<string, string>(root.proxies.map((proxy: any) => [proxy.name, canonicalType(proxy.type)]));
   for (const group of root['proxy-groups']) {
+    let chosen = names;
+    // We materialize generated names into proxies; native provider filters alone
+    // do not filter this explicit list. Apply the saved selector before expansion.
+    if (typeof group.filter === 'string' && group.filter) chosen = chosen.filter(patternMatcher(group.filter, warnings)!);
+    if (typeof group['exclude-filter'] === 'string' && group['exclude-filter']) {
+      const excluded = patternMatcher(group['exclude-filter'], warnings, false, true)!;
+      chosen = chosen.filter(name => !excluded(name));
+    }
+    const excludedTypes = new Set(typeof group['exclude-type'] === 'string' ? group['exclude-type'].split('|').map(canonicalType) : []);
+    if (excludedTypes.size) chosen = chosen.filter(name => !excludedTypes.has(types.get(name) || ''));
     let filtered = false;
     const members: string[] = [];
     for (const member of group.proxies) {
-      if (member === '$proxy_group') { filtered = true; members.push(...names); continue; }
+      if (member === '$proxy_group') { filtered = true; members.push(...chosen); continue; }
       const matcher = patternMatcher(member, warnings, true);
-      if (matcher) { filtered = true; members.push(...names.filter(matcher)); } else members.push(member);
+      if (matcher) { filtered = true; members.push(...chosen.filter(matcher)); } else members.push(member);
     }
-    if (!filtered) members.push(...names);
-    group.proxies = [...new Set(members)].filter(n => n !== group.name);
+    if (!filtered) members.push(...chosen);
+    group.proxies = [...new Set(members)].filter(n => n !== group.name && (!types.has(n) || !excludedTypes.has(types.get(n)!)));
     if (!group.proxies.length && !(Array.isArray(group.use) && group.use.length)) warn(warnings, '请调整代理分组筛选，让分组匹配可用节点。');
   }
   // Keep empty provider-backed groups and nested group references; deleting them can invalidate user rules.

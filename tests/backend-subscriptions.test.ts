@@ -38,6 +38,34 @@ const synthetic = {
   surfboard: customIni,
 } satisfies Record<TemplateName, string>;
 
+test('YAML group filter materializes only matching nodes and keeps HK separate from bulk download', () => {
+  const filter='(?i)🇸🇬|🇯🇵|🇺🇸|SG|JP|US|Starhub|Sony|LightSail|Akko|Bitsflow|DMIT|新加坡|日本|美国';
+  const content='# preserve exact template\nproxies: []\nproxy-groups:\n  - name: 大流量下载\n    type: url-test\n    filter: "'+filter+'"\n    exclude-type: trusttunnel\n    url: https://probe.example.test/204\n  - {name: HK自动, type: url-test, filter: "(?i)🇭🇰|港|HK"}\nrules: ["MATCH,大流量下载"]\n';
+  const db=database();initializeSubscriptionTemplates(db);const saved=saveTemplate(db,'clashmeta',content);
+  const inputs=['🇭🇰AliCDT','🇭🇰Ciallo@腾讯IX','🇸🇬LightSail','🇯🇵Zouter','🇺🇸bitsflow','🇩🇪MhyIDC 9929','🇩🇪Akko'].map((name,id)=>endpoint({name,id:id+1}));
+  const cfg=parse(renderSubscription(saved,inputs).content);
+  expect(cfg['proxy-groups'][0].proxies).toEqual(['🇸🇬LightSail','🇯🇵Zouter','🇺🇸bitsflow','🇩🇪Akko']);
+  expect(cfg['proxy-groups'][0].proxies.some((name:string)=>name.includes('🇭🇰'))).toBe(false);
+  expect(cfg['proxy-groups'][1].proxies).toEqual(['🇭🇰AliCDT','🇭🇰Ciallo@腾讯IX']);
+  expect(cfg['proxy-groups'][0].filter).toBe(filter);expect(cfg.rules).toEqual(['MATCH,大流量下载']);expect(getTemplate(db,'clashmeta')!.content).toBe(content);
+});
+
+test('YAML include, exclude and type selectors apply to expanded markers while authored nested groups survive', () => {
+  const inputs=[endpoint({id:1,name:'🇭🇰Akko HK'}),endpoint({id:2,name:'🇺🇸Akko US'}),endpoint({id:3,name:'🇯🇵Sony JP'}),endpoint({id:4,name:'🇸🇬SS',protocol:'shadowsocks',settings:{method:'aes-128-gcm'}})];
+  const content='proxies: []\nproxy-groups:\n  - {name: 总模式, type: select, proxies: [大流量, DIRECT]}\n  - {name: 大流量, type: select, filter: "(?i)Akko|Sony|SS", exclude-filter: "(?i)🇭🇰|HK|香港", exclude-type: "Shadowsocks|HTTP", proxies: [手动, DIRECT, "$proxy_group"]}\n  - {name: 手动, type: select, proxies: ["/(?i)us|jp/"]}\nrules: ["MATCH,总模式"]\n';
+  for(const format of ['clash','clashmeta','stash'] as const){const cfg=parse(renderSubscription(template(format,content),inputs).content);expect(cfg['proxy-groups'][1].proxies).toEqual(['手动','DIRECT','🇺🇸Akko US','🇯🇵Sony JP']);expect(cfg['proxy-groups'][2].proxies).toEqual(['🇺🇸Akko US','🇯🇵Sony JP']);expect(cfg['proxy-groups'][0].proxies).toContain('大流量')}
+});
+
+test('YAML delimited inline case-insensitive selectors and explicit type exclusions are respected', () => {
+ const content='proxies: [{name: Static HTTP, type: http, server: static.example.test, port: 443}]\nproxy-groups: [{name: HK, type: select, proxies: ["/(?i)HK/", Static HTTP, DIRECT], exclude-type: HTTP}]\nrules: ["MATCH,HK"]\n';
+ const cfg=parse(renderSubscription(template('clashmeta',content),[endpoint({name:'lowercase hk'}),endpoint({id:2,name:'Japan JP'})]).content);
+ expect(cfg['proxy-groups'][0].proxies).toEqual(['lowercase hk','DIRECT']);expect(cfg.proxies).toHaveLength(3);
+});
+
+test('invalid or unsafe YAML exclude selectors keep generated members excluded rather than silently broadening a group',()=>{
+ for(const pattern of ['[','(?=private-secret)']){const content=JSON.stringify({proxies:[],'proxy-groups':[{name:'safe',type:'select',proxies:['DIRECT','$proxy_group'],filter:'US|HK','exclude-filter':pattern}],rules:['MATCH,safe']});const result=renderSubscription(template('clashmeta',content),[endpoint({name:'US'}),endpoint({id:2,name:'HK'})]);expect(parse(result.content)['proxy-groups'][0].proxies).toEqual(['DIRECT']);expect(result.warnings.length).toBeGreaterThan(0);expect(result.warnings.join('')).not.toContain('private-secret')}
+});
+
 test('six archived original records seed before defaults, including names, IDs, timestamps and exact bytes', () => {
   const db = database(); legacy(db, synthetic); initializeSubscriptionTemplates(db);
   expect(listTemplates(db)).toHaveLength(6);
