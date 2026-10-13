@@ -51,5 +51,23 @@ Bearer machine token. Store hashed tokens server-side. Browser sessions are reje
 - `GET /api/node/v1/config` -> `{revision:number,config:object}` (full sing-box server JSON). Empty enabled inbound set is an explicit valid revision to apply. Users carry unique UUID, group authorization, quota/expiry, protocol password derived from own credential. Config uses per-inbound user names equal to decimal user IDs. TLS file placeholders `/etc/mboard-node/tls/<node_id>.crt` and `.key`. Shadowsocks method `aes-128-gcm`.
 - `POST /api/node/v1/traffic` `{batch_id:string,records:[{user_id:number,node_id:number,upload_bytes:number,download_bytes:number}]} -> {accepted:boolean}`. Unique machine_id+batch_id gives idempotence; validate ownership, user grant and safe integers. Same traffic may span multiple records. Atomic counter/ledger updates.
 
+## Restored subscription templates
+- `GET /api/v1/admin/subscription/templates` lists six independently stored formats and exact content, timestamps and source.
+- `PUT /api/v1/admin/subscription/templates/:name` `{content}` validates and saves exact submitted bytes.
+- `POST .../:name/validate` `{content}` returns `{valid,errors:[{message,line?,column?}],warnings}`.
+- `POST .../:name/preview` `{content}` returns `{template_name,content_type,content,node_count,warnings}` using explicitly synthetic endpoints.
+- Names: `singbox`, `clash`, `clashmeta`, `stash`, `surge`, `surfboard`. Maximum UTF-8 content is 512 KiB.
+- Subscription `format`, `target` and legacy `flag` choose explicit formats. Otherwise actual client UA selects the format, including `clash.meta`.
+- Original imported token links remain subscription-only compatibility paths until owner rotation. Administrative APIs keep their separate session/role gates.
+
+## Restored machine runtime
+Complete archived protocols, root/child entries and routing are normalized into independent runtime tables. Native `GET /api/node/v1/config` may include `traffic_labels:[{label,user_id,node_id}]` outside native config. Pending machines fetch config after verified credential provisioning; publication requires activation, the current applied numeric revision, ready core and ready telemetry, plus fresh heartbeat.
+
+- Runtime heartbeat also accepts optional `core_ready` and `telemetry_ready` booleans.
+- Runtime traffic uses a permanent per-machine batch ledger and separate entry-node daily attribution. Delayed valid-grant counters remain accountable after quota/expiry transitions.
+- `POST /api/node/v1/enroll` `{machine_id}` exchanges exact archived credentials for new 64-hex credentials, or repairs an existing machine using its current bearer. Legacy source 32/64-character credentials apply to this one-time route. Configuration validation precedes issuance.
+- `POST /api/node/v1/activate` `{config_revision}` uses current runtime bearer and fresh/current ready health, returning `{activated:true,machine_id,config_revision}`. Old source credential exchange closes after activation.
+- Overview and node/machine lists merge restored runtime objects. Restored complex objects show their complete-config status, avoiding partial basic-editor overwrites.
+
 ## Safety
 Origin check on mutation routes, cookie auth, secure cookies for HTTPS (development local HTTP supported). Rate-limit login. Prepared SQL. Validate enum/range/length. Admin role gates. New config revisions for user grant/credential/enable changes, nodes/groups changes, token rotations. Secrets excluded from audit/errors. SPA static path traversal protected. Demo fixtures only in browser test mocked responses.
