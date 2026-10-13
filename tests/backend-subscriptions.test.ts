@@ -374,7 +374,7 @@ test('preview and actual subscriptions share one result contract and only their 
 });
 
 // Public PHP resource only: never read an archive, database or customer endpoint for these fixtures.
-const phpSingboxDefault = readFileSync(new URL('../../Xboard/resources/rules/default.sing-box.json', import.meta.url), 'utf8');
+const phpSingboxDefault = readFileSync(new URL('./fixtures/legacy-singbox-shape.json', import.meta.url), 'utf8');
 const legacySingboxDefault = phpSingboxDefault + ' '.repeat(Math.max(0, 4095 - Buffer.byteLength(phpSingboxDefault)));
 const realityEndpoint = (host: string): SubscriptionEndpoint => endpoint({
   name: '合成 Reality', protocol: 'vless', host, credential: '00000000-0000-4000-8000-000000000001',
