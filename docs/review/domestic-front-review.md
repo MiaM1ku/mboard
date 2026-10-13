@@ -46,6 +46,19 @@ Limits: HTTP 前置的 UDP/QUIC 通道没有验证。对源站普通 TLS 的 cur
 
 公网管理浏览器检查 1440px、390px 的节点和机器页面：归档展示零出现，imports 请求零次，一个 h1、页面横向溢出 false。站点设置中的 Clash Meta 模板包含可编辑前置 helper 和选择组，在线校验通过，页面运行错误数组为空。短期验证会话随后撤销。
 
+## 独立 CN 中转模式更新
+
+按用户后续要求，分组前部现在依次为“总模式”“CN中转”“CN前置”“节点选择”“ADGuard前置”。总模式成员包含 CN中转。
+
+- CN前置：选 DIRECT 或五个国内 HTTP 中转。
+- CN中转：选专用 inline provider 中的海外出口。
+- 普通节点：保持原配置，全部没有强制 dialer-proxy。
+- 专用 cn-relay provider：复制该用户允许的海外节点，override.dialer-proxy=CN前置。
+
+保存模板的 helper 采用 `{front:CN前置,group:CN中转,provider:cn-relay}`。前置和独立出口组都保持静态控制成员，模板中的 ADGuard provider、其他规则和值继续保留。
+
+真实 Mihomo 1.19.32 配置校验通过，临时控制端分别选择“普通 Panstar”与“CN中转”，CN前置选苏州联通、CN中转出口选 Panstar Reality。两种模式都完成真实 HTTPS 请求，curl exit=0，核对普通节点链路独立。
+
 ## 数据与回退
 
 原 Clash Meta 内容以 0600 保存在远程 `pre-domestic-front-clashmeta.txt`。新增代理认证字段只在远程私密配置和经授权订阅中出现。临时 Mihomo 控制器在测试结束后关闭。
