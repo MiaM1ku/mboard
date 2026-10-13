@@ -62,7 +62,7 @@ class InstallerTest(unittest.TestCase):
         return self.shell('validate_bundle "$TEST_ROOT/bundle.json"', success)
 
     def test_legacy_32_character_machine_credential(self):
-        legacy = 'a' * 32
+        legacy = 'mBoardLegacyNode' * 2
         self.file('legacy.yml', 'machine:\n  machine_id: 10\n  token: "' + legacy + '"\n')
         self.file('credentials.env', 'LEGACY_TOKEN=' + legacy + '\n')
         for result in self.shell('old_machine_record "$TEST_ROOT/legacy.yml"; credential_token "$TEST_ROOT/credentials.env" LEGACY_TOKEN'):

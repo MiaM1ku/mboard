@@ -9,7 +9,7 @@ CORE_SHA256='1e6b4ef716062484f52d3490c3b1c4d7798e8cd76aeaba3f01e9f3320c63bd90'
 say() { printf '%s\n' "$*"; }
 fail() { printf 'Installer needs attention: %s\n' "$*" >&2; exit 1; }
 hex_token() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-fA-F]*) return 1;; *) return 0;; esac; }
-machine_token() { case "${#1}" in 32|64) case "$1" in *[!0-9a-fA-F]*) return 1;; *) return 0;; esac;; *) return 1;; esac; }
+machine_token() { case "${#1}" in 32|64) case "$1" in *[!A-Za-z0-9_-]*) return 1;; *) return 0;; esac;; *) return 1;; esac; }
 valid_id() { case "$1" in ''|0|0*|*[!0-9]*) return 1;; esac; [ "${#1}" -le 15 ]; }
 valid_origin() {
     case "$1" in https://*) host=${1#https://};; *) return 1;; esac
@@ -46,7 +46,7 @@ old_machine_record() {
     }
     END {
         if(bad || count!=1 || ids!=1 || tokens>1 || envs>1 || (tokens==1 && envs==1) || id !~ /^[1-9][0-9]*$/) exit 1
-        if(tokens && ((length(token)!=32 && length(token)!=64) || token ~ /[^0-9a-fA-F]/)) exit 1
+        if(tokens && ((length(token)!=32 && length(token)!=64) || token ~ /[^A-Za-z0-9_-]/)) exit 1
         if(envs && env !~ /^[A-Za-z_][A-Za-z0-9_]*$/) exit 1
         printf "%s|%s|%s\n",id,token,env
     }' "$1"
@@ -62,7 +62,7 @@ credential_token() {
           q=substr(value,1,1); if(substr(value,length(value),1)!=q) bad=1
           value=substr(value,2,length(value)-2)
       }
-      if((length(value)!=32 && length(value)!=64) || value ~ /[^0-9a-fA-F]/) bad=1
+      if((length(value)!=32 && length(value)!=64) || value ~ /[^A-Za-z0-9_-]/) bad=1
     }
     END {if(count!=1 || bad) exit 1; print value}' "$1"
 }
