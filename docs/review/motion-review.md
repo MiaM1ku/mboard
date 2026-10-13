@@ -25,6 +25,8 @@ Result: pass
 
 修复：关闭动作立即执行 dialog.close、释放滚动和恢复焦点。退出阶段画面用 display/overlay 的离散过渡保留，退出画面 inert 且 pointer-events:none。内容在 180ms 后卸载。减少动态效果时立即卸载。把这一行为明确写入共享规则。
 
+主题切换最初采用根 view-transition。目视检查发现，页面还在加载或改变内容尺寸时，根截图交叉缩放产生重影。改为实际表面颜色过渡和主题图标旋转，保持原页面结构与操作节点。
+
 ## 一次复查
 
 `bun run build` 通过。`bun run test:e2e` 的 9 个场景通过，包含原 6 场景及 3 个新增动效场景。
@@ -52,6 +54,12 @@ Result: pass
 - [用户端移动深色](motion/user-mobile-dark.png)
 
 截图表达动画结束后的布局。动画行为由浏览器帧时钟、DOM 状态和媒体偏好检查验证。
+
+## 线上部署复核
+
+example-host 的现有 /opt/mboard 面板构建已切换到动效版本，已有静态下载和旧资源文件保留。Bun 服务持续运行，前端发布采用静态产物切换。
+
+真实站点 Chromium 检查：管理概览命中 mb-page-enter、mb-surface-enter、四个原始指标和一个真实日期的图表；1440px 页面宽度正常。创建节点弹窗进场和 Escape 关闭通过。390px 减少动态效果模式的标题时长 0.00001s、延迟 0s，导航关闭焦点正常、横向溢出为 false、页面运行错误数组为空。短期私密验证会话随后退役。
 
 Violations: 复查时为零。
 Deviations: 原生 dialog 离散 display/overlay 过渡在支持该特性的浏览器中保留退出画面，较旧浏览器采用立即关闭，交互和焦点即时释放。
