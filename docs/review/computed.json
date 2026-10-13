@@ -8,7 +8,7 @@
     "size": "30px",
     "weight": "700",
     "lineHeight": "37.5px",
-    "color": "rgb(230, 242, 238)",
+    "color": "rgb(223, 235, 231)",
     "background": "rgba(0, 0, 0, 0)"
   },
   "number": {
@@ -16,7 +16,7 @@
     "size": "32px",
     "weight": "650",
     "lineHeight": "38.4px",
-    "color": "rgb(230, 242, 238)",
+    "color": "rgb(223, 235, 231)",
     "background": "rgba(0, 0, 0, 0)"
   },
   "action": {

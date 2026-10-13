@@ -13,6 +13,13 @@ export function TrafficChart({
   description?: string;
 }) {
   const id = useId().replace(/:/g, "");
+  const seriesKey = JSON.stringify(
+    data.map(({ date, upload_bytes, download_bytes }) => [
+      date,
+      upload_bytes,
+      download_bytes,
+    ]),
+  );
   const svgRef = useRef<SVGSVGElement>(null);
   const [w, setWidth] = useState(840);
   useLayoutEffect(() => {
@@ -104,46 +111,62 @@ export function TrafficChart({
                   </text>
                 </g>
               ))}
-              {data.length > 1 && (
-                <>
-                  <polygon points={area} fill={`url(#${id})`} />
-                  <polyline
-                    points={totalPoints}
-                    fill="none"
-                    stroke="var(--info)"
-                    strokeWidth="2.5"
-                    strokeLinejoin="round"
-                  />
-                  <polyline
-                    points={uploadPoints}
-                    fill="none"
-                    stroke="var(--primary)"
-                    strokeWidth="2.5"
-                    strokeLinejoin="round"
-                  />
-                </>
-              )}
-              {data.length === 1 && (
-                <>
-                  <circle
-                    cx={left + chartW / 2}
-                    cy={
-                      top +
-                      chartH -
-                      ((data[0].upload_bytes + data[0].download_bytes) / max) *
-                        chartH
-                    }
-                    r={4}
-                    fill="var(--info)"
-                  />
-                  <circle
-                    cx={left + chartW / 2}
-                    cy={top + chartH - (data[0].upload_bytes / max) * chartH}
-                    r={4}
-                    fill="var(--primary)"
-                  />
-                </>
-              )}
+              <g
+                key={seriesKey}
+                className="mb-custom-chart-series"
+                data-motion-points={data.length}
+              >
+                {data.length > 1 && (
+                  <>
+                    <polygon
+                      className="mb-custom-chart-area"
+                      points={area}
+                      fill={`url(#${id})`}
+                    />
+                    <polyline
+                      className="mb-custom-chart-line"
+                      pathLength={1}
+                      points={totalPoints}
+                      fill="none"
+                      stroke="var(--info)"
+                      strokeWidth="2.5"
+                      strokeLinejoin="round"
+                    />
+                    <polyline
+                      className="mb-custom-chart-line"
+                      pathLength={1}
+                      points={uploadPoints}
+                      fill="none"
+                      stroke="var(--primary)"
+                      strokeWidth="2.5"
+                      strokeLinejoin="round"
+                    />
+                  </>
+                )}
+                {data.length === 1 && (
+                  <>
+                    <circle
+                      className="mb-custom-chart-point"
+                      cx={left + chartW / 2}
+                      cy={
+                        top +
+                        chartH -
+                        ((data[0].upload_bytes + data[0].download_bytes) / max) *
+                          chartH
+                      }
+                      r={4}
+                      fill="var(--info)"
+                    />
+                    <circle
+                      className="mb-custom-chart-point"
+                      cx={left + chartW / 2}
+                      cy={top + chartH - (data[0].upload_bytes / max) * chartH}
+                      r={4}
+                      fill="var(--primary)"
+                    />
+                  </>
+                )}
+              </g>
               {data
                 .filter(
                   (_, i) =>

@@ -34,6 +34,7 @@ import {
   useToast,
 } from "./ui";
 import { TrafficChart } from "./TrafficChart";
+import { AnimatedValue } from "./motion";
 import { SubscriptionTemplates } from "./SubscriptionTemplates";
 
 const ROOT = "/api/v1/admin";
@@ -683,7 +684,9 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
               <Card>
                 <div className="card-body">
                   <div className="mb-custom-meta">账户</div>
-                  <div className="kpi-value">{count(data.users)}</div>
+                  <div className="kpi-value">
+                    <AnimatedValue value={data.users} format={count} />
+                  </div>
                   <p className="mb-custom-stat-note">
                     {count(data.enabled_users)} 个启用账户
                   </p>
@@ -699,7 +702,9 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
               <Card>
                 <div className="card-body">
                   <div className="mb-custom-meta">节点</div>
-                  <div className="kpi-value">{count(data.nodes)}</div>
+                  <div className="kpi-value">
+                    <AnimatedValue value={data.nodes} format={count} />
+                  </div>
                   <p className="mb-custom-stat-note">
                     {count(data.online_nodes)} 个在线节点
                   </p>
@@ -715,7 +720,9 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
               <Card>
                 <div className="card-body">
                   <div className="mb-custom-meta">机器</div>
-                  <div className="kpi-value">{count(data.machines)}</div>
+                  <div className="kpi-value">
+                    <AnimatedValue value={data.machines} format={count} />
+                  </div>
                   <p className="mb-custom-stat-note">
                     {count(data.online_machines)} 台在线机器
                   </p>
@@ -732,7 +739,10 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                 <div className="card-body">
                   <div className="mb-custom-meta">累计流量</div>
                   <div className="kpi-value">
-                    {formatBytes(data.upload_bytes + data.download_bytes)}
+                    <AnimatedValue
+                      value={data.upload_bytes + data.download_bytes}
+                      format={formatBytes}
+                    />
                   </div>
                   <p className="mb-custom-stat-note">
                     上传 {formatBytes(data.upload_bytes)} · 下载{" "}

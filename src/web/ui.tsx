@@ -4,6 +4,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useId,
   useRef,
   useState,
@@ -195,50 +196,61 @@ export function Modal({
   const id = useId();
   const close = useRef(onClose);
   close.current = onClose;
-  useEffect(() => {
+  const content = useRef(children);
+  if (open) content.current = children;
+  const [present, setPresent] = useState(open);
+  const restoreFocus = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const media = matchMedia("(prefers-reduced-motion: reduce)");
+    const finish = () => setPresent(false);
+    const release = () => {
+      dialog.close();
+      document.body.classList.toggle("modal-open", Boolean(document.querySelector("dialog[open]")));
+      if (restoreFocus.current?.isConnected) restoreFocus.current.focus();
+    };
+    const motionChanged = () => { if (media.matches) { clearTimeout(timer); finish(); } };
     if (open) {
-      const previous = document.activeElement as HTMLElement | null;
-      const trap = (event: KeyboardEvent) => {
-        if (event.key !== "Tab") return;
-        const targets = Array.from(
-          dialog.querySelectorAll<HTMLElement>(
-            'button:not([disabled]),a[href],input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
-          ),
-        ).filter((element) => element.getClientRects().length > 0);
-        const first = targets[0],
-          last = targets[targets.length - 1];
-        if (!first) {
-          event.preventDefault();
-          dialog.focus();
-          return;
-        }
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        }
-      };
-      dialog.addEventListener("keydown", trap);
-      dialog.showModal();
+      setPresent(true);
+      dialog.dataset.phase = "enter";
+      dialog.inert = false;
+      if (!dialog.open) {
+        restoreFocus.current = document.activeElement as HTMLElement | null;
+        dialog.showModal();
+      }
       document.body.classList.add("modal-open");
-      return () => {
-        dialog.removeEventListener("keydown", trap);
-        dialog.close();
-        document.body.classList.remove("modal-open");
-        previous?.focus();
-      };
-    } else dialog.close();
+    } else if (dialog.open) {
+      dialog.dataset.phase = "exit";
+      dialog.inert = true;
+      release();
+      if (media.matches) finish();
+      else { timer = setTimeout(finish, 180); media.addEventListener("change", motionChanged); }
+    }
+    return () => { clearTimeout(timer); media.removeEventListener("change", motionChanged); };
   }, [open]);
+  useEffect(() => () => {
+    ref.current?.close();
+    document.body.classList.toggle("modal-open", Boolean(document.querySelector("dialog[open]")));
+    if (restoreFocus.current?.isConnected) restoreFocus.current.focus();
+  }, []);
   return (
     <dialog
       ref={ref}
       className={`modal ${large ? "modal-large" : ""}`}
       aria-labelledby={id}
       aria-describedby={description ? `${id}-desc` : undefined}
+      onKeyDown={(event) => {
+        if (event.key !== "Tab" || !open) return;
+        const targets = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+          'button:not([disabled]),a[href],input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+        )).filter(element => element.getClientRects().length > 0);
+        const first = targets[0], last = targets[targets.length - 1];
+        if (!first) { event.preventDefault(); event.currentTarget.focus(); }
+        else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }}
       onCancel={(e) => {
         e.preventDefault();
         close.current();
@@ -270,7 +282,7 @@ export function Modal({
           <X size={20} />
         </Button>
       </header>
-      <div className="modal-body">{open && children}</div>
+      <div className="modal-body">{(open || present) && content.current}</div>
       {footer && <footer className="modal-footer">{footer}</footer>}
     </dialog>
   );
@@ -280,23 +292,29 @@ const ToastContext = createContext<{
 }>({ notify: () => {} });
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<
-    { id: number; message: string; tone: string }[]
+    { id: number; message: string; tone: string; exiting?: boolean }[]
   >([]);
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
+  const schedule = (action: () => void, delay: number) => {
+    const timer = setTimeout(() => { timers.current.delete(timer); action(); }, delay);
+    timers.current.add(timer);
+  };
+  const dismiss = (id: number) => {
+    setItems(items => items.map(item => item.id === id ? { ...item, exiting: true } : item));
+    schedule(() => setItems(items => items.filter(item => item.id !== id)), matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180);
+  };
   const notify = (message: string, tone = "success") => {
     const id = Date.now() + Math.random();
     setItems((s) => [...s, { id, message, tone }]);
-    timers.current.push(
-      setTimeout(() => setItems((s) => s.filter((x) => x.id !== id)), 4500),
-    );
+    schedule(() => dismiss(id), 4500);
   };
   return (
     <ToastContext.Provider value={{ notify }}>
       {children}
       <div className="toast-region" aria-live="polite">
         {items.map((x) => (
-          <div key={x.id} className={`toast toast-${x.tone}`}>
+          <div key={x.id} className={`toast toast-${x.tone}`} data-exiting={x.exiting || undefined} inert={x.exiting}>
             {x.tone === "success" ? (
               <Check size={18} />
             ) : (
@@ -307,7 +325,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               variant="ghost"
               size="icon"
               aria-label="关闭提示"
-              onClick={() => setItems((s) => s.filter((y) => y.id !== x.id))}
+              onClick={() => dismiss(x.id)}
             >
               <X size={16} />
             </Button>
@@ -321,8 +339,8 @@ export const useToast = () => useContext(ToastContext);
 export function Loading() {
   return (
     <div className="mb-custom-loading" role="status">
-      <LoaderCircle className="spin" size={22} />
-      正在读取数据…
+      <LoaderCircle className="spin" size={22} aria-hidden />
+      <span>正在读取数据<span className="mb-custom-loading-dots" aria-hidden><i /><i /><i /></span></span>
     </div>
   );
 }

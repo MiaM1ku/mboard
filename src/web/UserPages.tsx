@@ -46,15 +46,18 @@ import {
   useToast,
 } from "./ui";
 import { TrafficChart } from "./TrafficChart";
+import { AnimatedValue } from "./motion";
 
 function Kpi({
   title,
   value,
+  format,
   hint,
   icon,
 }: {
   title: string;
-  value: string;
+  value: number;
+  format?: (n: number) => string;
   hint: string;
   icon: React.ReactNode;
 }) {
@@ -64,7 +67,9 @@ function Kpi({
         <span>{title}</span>
         {icon}
       </div>
-      <div className="kpi-value">{value}</div>
+      <div className="kpi-value">
+        <AnimatedValue value={value} format={format} />
+      </div>
       <div className="kpi-hint">{hint}</div>
     </Card>
   );
@@ -130,25 +135,28 @@ function Home({ onNavigate }: { onNavigate: (s: string) => void }) {
           <div className="kpi-grid">
             <Kpi
               title="累计用量"
-              value={formatBytes(total)}
+              value={total}
+              format={formatBytes}
               hint="上传 + 下载"
               icon={<Signal size={18} />}
             />
             <Kpi
               title="可用节点"
-              value={String(resource.data.nodes.length)}
+              value={resource.data.nodes.length}
               hint="按权限组分配"
               icon={<Network size={18} />}
             />
             <Kpi
               title="上传流量"
-              value={formatBytes(u.upload_bytes)}
+              value={u.upload_bytes}
+              format={formatBytes}
               hint="账号累计记录"
               icon={<ArrowUp size={18} />}
             />
             <Kpi
               title="下载流量"
-              value={formatBytes(u.download_bytes)}
+              value={u.download_bytes}
+              format={formatBytes}
               hint="账号累计记录"
               icon={<ArrowDown size={18} />}
             />
@@ -438,25 +446,28 @@ function Traffic() {
           <div className="kpi-grid">
             <Kpi
               title="区间总流量"
-              value={formatBytes(up + down)}
+              value={up + down}
+              format={formatBytes}
               hint={`最近 ${days} 天`}
               icon={<Signal size={18} />}
             />
             <Kpi
               title="区间上传"
-              value={formatBytes(up)}
+              value={up}
+              format={formatBytes}
               hint="设备发送流量"
               icon={<ArrowUp size={18} />}
             />
             <Kpi
               title="区间下载"
-              value={formatBytes(down)}
+              value={down}
+              format={formatBytes}
               hint="设备接收流量"
               icon={<ArrowDown size={18} />}
             />
             <Kpi
               title="记录天数"
-              value={String(r.data?.length || 0)}
+              value={r.data?.length || 0}
               hint="有上报记录的日期"
               icon={<SlidersHorizontal size={18} />}
             />

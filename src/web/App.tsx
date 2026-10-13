@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import {
   Activity,
   ArrowLeft,
@@ -82,6 +82,7 @@ function Workspace() {
   );
   const navRef = useRef<HTMLElement>(null);
   const menuRef = useRef<HTMLButtonElement>(null);
+  const [navMarker, setNavMarker] = useState({ top: 0, height: 0 });
   const { notify } = useToast();
   useEffect(() => {
     const expired = () => auth.reload();
@@ -147,6 +148,22 @@ function Workspace() {
   const nav = admin ? adminNav : userNav;
   const page = nav.some((n) => n.key === route.page) ? route.page : "overview";
   const name = nav.find((n) => n.key === page)?.label || "";
+  useLayoutEffect(() => {
+    const section = navRef.current?.querySelector<HTMLElement>(".nav-section");
+    const active = section?.querySelector<HTMLElement>(".nav-item.is-active");
+    if (!section || !active) return;
+    const measure = () => setNavMarker(previous => {
+      const top = active.offsetTop, height = active.offsetHeight;
+      return previous.top === top && previous.height === height ? previous : { top, height };
+    });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(section);
+    return () => observer.disconnect();
+  }, [admin, page, narrow, user?.id]);
+  function toggleTheme() {
+    setDark(value => !value);
+  }
   function navigate(p: string) {
     location.hash = `/${admin ? "admin" : "user"}/${p}`;
     setMobile(false);
@@ -214,6 +231,7 @@ function Workspace() {
         </Button>
         <nav>
           <div className="nav-section">
+            <div className="mb-custom-nav-marker" aria-hidden style={{ height: navMarker.height, transform: `translateY(${navMarker.top}px)`, opacity: navMarker.height ? 1 : 0 }} />
             <div className="nav-label">
               {admin ? "管理工作区" : "我的工作区"}
             </div>
@@ -255,17 +273,18 @@ function Workspace() {
           <div className="sidebar-note">mboard · independent by design</div>
         </div>
       </aside>
-      {mobile && (
-        <button
+      <button
           type="button"
-          className="sidebar-scrim"
+          className={`sidebar-scrim ${mobile ? "is-open" : ""}`}
+          inert={!mobile}
+          aria-hidden={!mobile}
+          tabIndex={mobile ? 0 : -1}
           onClick={() => {
             setMobile(false);
             menuRef.current?.focus();
           }}
           aria-label="关闭导航遮罩"
         />
-      )}
       <div className="app-main" inert={mobile && narrow}>
         <header className="topbar">
           <button
@@ -293,16 +312,18 @@ function Workspace() {
               variant="ghost"
               size="icon"
               aria-label={dark ? "切换浅色主题" : "切换深色主题"}
-              onClick={() => setDark((v) => !v)}
+              onClick={toggleTheme}
             >
-              {dark ? <Sun size={18} /> : <Moon size={18} />}
+              <span key={dark ? "sun" : "moon"} className="mb-custom-theme-icon" aria-hidden>
+                {dark ? <Sun size={18} /> : <Moon size={18} />}
+              </span>
             </Button>
             <span className="avatar" title={`${user.name} · ${user.email}`}>
               {(user.name || user.email).slice(0, 1).toUpperCase()}
             </span>
           </div>
         </header>
-        <main className="page-content">
+        <main key={`${admin ? "admin" : "user"}-${page}`} className="page-content mb-custom-page-enter">
           {admin ? (
             <AdminPage
               key={`admin-${page}`}

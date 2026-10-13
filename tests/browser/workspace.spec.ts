@@ -200,6 +200,7 @@ test("桌面和移动布局、双主题、页面能力文案", async ({ page }) 
         await page.goto(`/#/${area}/${route}`);
         await expect(page.locator(".mb-custom-loading")).toHaveCount(0);
         await invariant(page);
+        await expect(page.locator('.mb-custom-motion-number[data-motion-state="animating"]')).toHaveCount(0);
         if (route === "overview" || route === "users" || route === "nodes")
           await page.screenshot({
             path: `docs/review/${area}-${route}-${width}.png`,
@@ -225,6 +226,8 @@ test("桌面和移动布局、双主题、页面能力文案", async ({ page }) 
   await expect(page.locator(".traffic-chart polygon")).toHaveCount(0);
   await expect(page.locator(".traffic-chart circle")).toHaveCount(2);
   await page.goto("/#/user/overview");
+  await expect(page.getByRole("heading", { name: "连接，从这里开始", exact: true })).toBeVisible();
+  await expect(page.locator('.mb-custom-motion-number[data-motion-state="animating"]')).toHaveCount(0);
   await page.getByRole("button", { name: "切换深色主题" }).click();
   await expect(page.locator("html")).toHaveClass("dark");
   await invariant(page);
@@ -513,4 +516,156 @@ test("移动导航和对话框键盘操作", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).not.toBeVisible();
   await invariant(page);
+});
+
+test("真实数字的动效、暂停和减少动态效果切换", async ({ page }) => {
+  await login(page, reader);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  await page.goto("/#/user/overview");
+  const number = page.locator(".kpi-card .mb-custom-motion-number").first();
+  await expect(number).toHaveAttribute("data-motion-state", "animating");
+  const finalLabel = await number.locator(".mb-custom-motion-number-label").textContent();
+  await expect(number.locator(".mb-custom-motion-number-visible")).toHaveAttribute("aria-hidden", "true");
+  await page.clock.runFor(200);
+  const midValue = await number.locator(".mb-custom-motion-number-visible").textContent();
+  expect(midValue).not.toBe(finalLabel);
+  expect(midValue).not.toBe("0 B");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.runFor(1000);
+  await expect(number.locator(".mb-custom-motion-number-visible")).toHaveText(midValue!);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: false });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.runFor(1000);
+  await expect(number).toHaveAttribute("data-motion-state", "settled");
+  await expect(number.locator(".mb-custom-motion-number-visible")).toHaveText(finalLabel!);
+  const source = (await (await page.request.get("/api/v1/overview")).json()).data;
+  expect(Number(await number.getAttribute("data-motion-value"))).toBe(source.user.upload_bytes + source.user.download_bytes);
+  await page.goto("/#/user/traffic");
+  const next = page.locator(".mb-custom-motion-number").first();
+  await expect(next).toHaveAttribute("data-motion-state", "animating");
+  await page.clock.runFor(100);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(next).toHaveAttribute("data-motion-state", "settled");
+  expect(await next.locator(".mb-custom-motion-number-visible").textContent()).toBe(await next.locator(".mb-custom-motion-number-label").textContent());
+  await invariant(page);
+});
+
+test("页面、图表和导航动效保留布局与真实数据点", async ({ page }) => {
+  await login(page, reader);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/user/overview");
+  await expect(page.locator(".kpi-card")).toHaveCount(4);
+  expect(await page.locator("main").evaluate(el => getComputedStyle(el).animationName)).toBe("mb-page-enter");
+  const cards = page.locator(".kpi-card");
+  expect(await cards.nth(0).evaluate(el => getComputedStyle(el).animationDelay)).toBe("0.09s");
+  expect(await cards.nth(3).evaluate(el => getComputedStyle(el).animationDelay)).toBe("0.255s");
+  const single = page.locator(".mb-custom-chart-series");
+  await expect(single).toHaveAttribute("data-motion-points", "1");
+  await expect(single.locator(".mb-custom-chart-point")).toHaveCount(2);
+  await page.evaluate(() => { (window as any).__motionSeries = document.querySelector(".mb-custom-chart-series"); });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => (window as any).__motionSeries === document.querySelector(".mb-custom-chart-series"))).toBe(true);
+  await invariant(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const marker = page.locator(".mb-custom-nav-marker");
+  await expect(marker).toHaveCSS("transition-duration", "0.42s, 0.24s, 0.16s");
+  const previous = await marker.getAttribute("style");
+  await page.getByRole("link", { name: "连接入口", exact: true }).click();
+  await expect(page.locator("h1")).toHaveText("连接入口");
+  await expect.poll(() => marker.getAttribute("style")).not.toBe(previous);
+  await page.route("**/api/v1/overview", async route => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const point = body.data.traffic[0];
+    body.data.traffic = [
+      { ...point, date: "2026-01-01" },
+      { ...point, date: "2026-01-02", upload_bytes: point.upload_bytes + 1024, download_bytes: point.download_bytes + 2048 },
+    ];
+    await route.fulfill({ response, json: body });
+  });
+  await page.goto("/#/user/overview");
+  await expect(page.locator(".mb-custom-chart-line")).toHaveCount(2);
+  for (const line of await page.locator(".mb-custom-chart-line").all()) {
+    await expect(line).toHaveAttribute("pathLength", "1");
+    expect(await line.evaluate(el => getComputedStyle(el).animationName)).toBe("mb-chart-draw");
+  }
+  await expect(page.locator('.mb-custom-motion-number[data-motion-state="animating"]')).toHaveCount(0);
+  mkdirSync("docs/review/motion", { recursive: true });
+  await page.screenshot({ path: "docs/review/motion/user-desktop.png", fullPage: true, animations: "disabled" });
+  await page.getByRole("button", { name: "切换深色主题" }).click();
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await invariant(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "docs/review/motion/user-mobile-dark.png", fullPage: true, animations: "disabled" });
+});
+
+test("弹窗进退场、提示反馈和减少动态效果的键盘操作", async ({ page }) => {
+  await login(page, reader);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/#/user/tickets");
+  const trigger = page.getByRole("button", { name: "提交问题", exact: true }).first();
+  await trigger.click();
+  const dialog = page.locator("dialog[open]");
+  await expect(dialog).toHaveAttribute("data-phase", "enter");
+  expect(await dialog.evaluate(el => getComputedStyle(el).animationName)).toBe("mb-dialog-enter");
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  await page.keyboard.press("Escape");
+  const exiting = page.locator('dialog[data-phase="exit"]');
+  await expect(exiting).toHaveAttribute("inert", "");
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await page.clock.runFor(200);
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/#/user/overview");
+  await page.getByRole("button", { name: "复制订阅链接", exact: true }).click();
+  const toast = page.locator(".toast").first();
+  await expect(toast).toContainText("订阅链接已经复制。");
+  expect(await toast.evaluate(el => getComputedStyle(el).animationName)).toBe("mb-toast-enter");
+  await toast.getByRole("button", { name: "关闭提示" }).click();
+  await expect(toast).toHaveAttribute("data-exiting", "true");
+  await page.clock.runFor(200);
+  await expect(page.locator(".toast")).toHaveCount(0);
+  await page.goto("/#/user/tickets");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "打开导航" }).click();
+  await expect(page.locator(".sidebar")).toHaveClass(/is-open/);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "打开导航" })).toBeFocused();
+  await trigger.click();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("dialog[open]")).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  const delays = await page.locator(".page-header h1").evaluate(el => ({
+    animationDuration: getComputedStyle(el).animationDuration,
+    animationDelay: getComputedStyle(el).animationDelay,
+    transitionDelay: getComputedStyle(el).transitionDelay,
+  }));
+  expect(parseFloat(delays.animationDuration)).toBeLessThanOrEqual(0.00001);
+  expect(delays.animationDelay).toBe("0s");
+  expect(delays.transitionDelay).toBe("0s");
+  await invariant(page);
+  await post(page.request, "auth/logout", {});
+  await login(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/admin/overview");
+  await page.reload();
+  await expect(page.getByRole("complementary", { name: "管理面板导航" })).toBeVisible();
+  await expect(page.locator(".mb-custom-motion-number")).toHaveCount(4);
+  await expect(page.locator('.mb-custom-motion-number[data-motion-state="animating"]')).toHaveCount(0);
+  const overview = (await (await page.request.get("/api/v1/admin/overview")).json()).data;
+  expect(Number(await page.locator(".mb-custom-motion-number").first().getAttribute("data-motion-value"))).toBe(overview.users);
+  await invariant(page);
+  await page.screenshot({ path: "docs/review/motion/admin-desktop.png", fullPage: true, animations: "disabled" });
 });

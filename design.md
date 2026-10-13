@@ -1,7 +1,7 @@
 ---
 name: mboard-design
 description: mboard 的用户和管理界面，覆盖仪表盘、密集列表、主从编辑器和登录表单，以清晰的数据层级服务桌面和移动阅读。
-version: e02a4f5448e88bfa7d3e9b5dacf3dd49792c5eef
+version: motion-2026-10-13
 ---
 
 # mboard design
@@ -41,7 +41,14 @@ version: e02a4f5448e88bfa7d3e9b5dacf3dd49792c5eef
 [SHOULD] Decision：窄视口的指标保留两列，相关大区块采用单列。来源：390px 的用户和管理仪表盘复核，可读数值支持更紧凑的首屏。
 [MUST] 时间序列只有一个日期时，用真实数据点表示上传和总流量。日期与数据点对齐。多个日期时按真实日期间距绘制折线。
 [SHOULD] loading 显示骨架或旋转图标，提交状态锁定对应按钮。错误提示提供下一步操作。禁用状态降透明度并保持标签可读。
-[MUST] prefers-reduced-motion 下动画和过渡取最短时长。
+[MUST] prefers-reduced-motion 下动画和过渡取最短时长，进场延迟归零，数值直接显示最终值。
+[SHOULD] Decision：页面切换用 420ms 淡入，内容表面用 560ms 上移 12px 淡入。相邻指标按 55ms 错开，内容表面的最大进场等待为 340ms。来源：用户要求加强用户端和管理面板动画。
+[SHOULD] Decision：控件反馈采用 160–240ms，活动导航标记沿实际菜单位置移动，移动抽屉采用 360ms 滑入滑出。来源：用户要求及共享导航、Button 原语。
+[MUST] 数字动效从真实原始数值计算，保留原格式函数。屏幕阅读器读取一个最终数值，视觉插值文本标记 aria-hidden。数据变化重定向动画，卸载时取消帧和监听。
+[SHOULD] Decision：数据插值默认 650ms，图表折线以 900ms 绘制，区域和单点分别淡入及缩放。图表在数据变化时重播，布局尺寸变化保持原动画节点。来源：现有数字和日期图表原语及用户反馈。
+[MUST] 对话框进退场保持原生 dialog、焦点循环和恢复。关闭立即释放原生模态状态、滚动和焦点；退出阶段的视觉画面移出交互，动画结束后卸载内容。
+[SHOULD] Decision：对话框进场 320ms、退出 180ms，提示进场 420ms、退出 180ms。用 transform 和 opacity 表达动作，保持布局和点击区域的尺寸。来源：共享 Modal、Toast 原语和用户反馈。
+[MUST] 装饰性进场采用有限次数。连续动画只用于正在加载的状态。减少动态效果时立即呈现可读状态。
 
 ## 5. 可用原语
 以下名称是公开原语。页面扩展使用 mb-custom-*，扩展负责内容排列。共享字号、颜色和表面由 styles.css 统一管理。
@@ -57,6 +64,8 @@ version: e02a4f5448e88bfa7d3e9b5dacf3dd49792c5eef
 | 状态 | Badge, EmptyState, ErrorState | src/web/ui.tsx | 状态反馈 | 已实现 |
 | 浮层 | Modal | src/web/ui.tsx | 对话框和主从编辑器 | 已实现 |
 | 数据 | .data-table, .table-wrap, .kpi-grid, .kpi-value, .mono | src/web/styles.css | 表格和数值 | 已实现 |
+| 动效 | --motion-fast=160ms, --motion-control=240ms, --motion-enter=560ms, --motion-data=760ms, --motion-ease=cubic-bezier(0.22,1,0.36,1), --motion-exit-ease=cubic-bezier(0.4,0,1,1) | src/web/styles.css | 页面、控件、表面与浮层 | 已实现 |
+| 动态数值 | AnimatedValue(value, format?, duration?); useReducedMotion | src/web/motion.tsx | 真实数值、最终值可读、减少动态效果 | 已实现 |
 | 图表 | TrafficChart | src/web/TrafficChart.tsx | 按日期的字节时间序列 | 已实现 |
 | 排布 | .dashboard-grid, .section-stack, .form-grid, .form-stack, .form-actions, .page-actions, .content-grid | src/web/styles.css | 数据分区与表单排列 | 已实现 |
 | 文字 | .eyebrow, .muted, .text-success, .text-danger, .notice-body, .category-label | src/web/styles.css | 层级、状态和长文 | 已实现 |
