@@ -38,6 +38,17 @@ const synthetic = {
   surfboard: customIni,
 } satisfies Record<TemplateName, string>;
 
+test('CN relay mode uses separate front and exit controls while normal exits remain direct',()=>{
+ const front={name:'CN HTTP',type:'http',server:'192.0.2.1',port:443,headers:{Host:'cdn.example.test'}};
+ const source=JSON.stringify({proxies:[front],'x-mboard-dialer-proxy':{front:'CN前置',group:'CN中转',provider:'cn-relay'},'proxy-groups':[{name:'总模式',type:'select',proxies:['节点选择','CN中转','DIRECT']},{name:'CN前置',type:'select',proxies:['DIRECT','CN HTTP']},{name:'CN中转',type:'select',proxies:[],use:['cn-relay']},{name:'节点选择',type:'select',proxies:[]}],rules:['MATCH,总模式']});
+ const outputs=parse(renderSubscription(template('clashmeta',source),[endpoint({name:'JP exit'}),endpoint({id:2,name:'HK exit'})]).content);
+ expect(outputs['proxy-groups'].map((g:any)=>g.name)).toEqual(['总模式','CN前置','CN中转','节点选择']);expect(outputs['proxy-groups'][1].proxies).toEqual(['DIRECT','CN HTTP']);expect(outputs['proxy-groups'][2].proxies).toEqual([]);expect(outputs['proxy-groups'][2].use).toEqual(['cn-relay']);expect(outputs['proxy-groups'][0].proxies).toContain('CN中转');
+ const provider=outputs['proxy-providers']['cn-relay'];expect(provider.type).toBe('inline');expect(provider.override).toEqual({'dialer-proxy':'CN前置'});expect(provider.payload.map((p:any)=>p.name)).toEqual(['JP exit','HK exit']);
+ for(const proxy of outputs.proxies)expect(proxy['dialer-proxy']).toBeUndefined();expect(outputs['x-mboard-dialer-proxy']).toBeUndefined();
+ const collision=JSON.parse(source);collision['proxy-providers']={'cn-relay':{type:'http',url:'https://private.example.test'}};expect(validateTemplate('clashmeta',JSON.stringify(collision)).valid).toBe(false);
+ const cyclic=JSON.parse(source);cyclic['x-mboard-dialer-proxy'].group='CN前置';expect(validateTemplate('clashmeta',JSON.stringify(cyclic)).valid).toBe(false);
+});
+
 test('Clash Meta optional dialer binds only dynamic exits and keeps front selection static',()=>{
  const fronts=Array.from({length:5},(_,i)=>({name:`国内前置${i+1}`,type:'http',server:`192.0.2.${i+1}`,port:443,tls:false,udp:false,headers:{Host:'cdn.example.test','X-Test-Auth':'synthetic-private','User-Agent':'synthetic-agent'}}));
  const source=JSON.stringify({proxies:fronts,'x-mboard-dialer-proxy':'国内前置','proxy-groups':[{name:'国内前置',type:'select','default-selected':'DIRECT',proxies:['DIRECT',...fronts.map(f=>f.name)]},{name:'大流量',type:'select',filter:'US|JP',proxies:['$proxy_group']}],rules:['MATCH,大流量']});

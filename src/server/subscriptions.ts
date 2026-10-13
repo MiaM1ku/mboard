@@ -97,10 +97,12 @@ function position(content: string, offset: number) {
   const prefix = content.slice(0, Math.max(0, offset));
   return { line: prefix.split('\n').length, column: prefix.length - prefix.lastIndexOf('\n') };
 }
-function clashMetaDialer(root: Record<string, any>, name: TemplateName): { name: string; groups: Set<string> } | null {
-  const target=root['x-mboard-dialer-proxy'];
-  if(target===undefined)return null;
-  if(name!=='clashmeta'||typeof target!=='string'||!target||target.length>200||/[\r\n\0]/.test(target))throw issue('请在 Clash Meta 模板中指定有效的前置选择组。');
+function clashMetaDialer(root: Record<string, any>, name: TemplateName): { name: string; groups: Set<string>; relayGroup?: string; provider?: string } | null {
+  const configured=root['x-mboard-dialer-proxy'];
+  if(configured===undefined)return null;
+  const separate=object(configured),target=separate?configured.front:configured;
+  const validName=(v:unknown):v is string=>typeof v==='string'&&!!v&&v.length<=200&&!/[\r\n\0]/.test(v);
+  if(name!=='clashmeta'||!validName(target)||separate&&(Object.keys(configured).some(k=>!['front','group','provider'].includes(k))||!validName(configured.group)||!validName(configured.provider)))throw issue('请在 Clash Meta 模板中指定有效的前置和出口选择组。');
   const groups=new Map<string,any>(root['proxy-groups'].map((g:any)=>[g.name,g])),proxies=new Map<string,any>(root.proxies.map((p:any)=>[p.name,p]));
   if(!groups.has(target)||proxies.has(target))throw issue('请为前置拨号指定独立的代理选择组。');
   const visited=new Set<string>(),active=new Set<string>();
@@ -117,7 +119,14 @@ function clashMetaDialer(root: Record<string, any>, name: TemplateName): { name:
     }
     active.delete(key);visited.add(key);
   };
-  visit(target);return{name:target,groups:visited};
+  visit(target);
+  if(separate){
+    const relay=groups.get(configured.group);
+    if(!relay||relay.type!=='select'||visited.has(configured.group)||relay.proxies.length||!Array.isArray(relay.use)||relay.use.length!==1||relay.use[0]!==configured.provider||root['proxy-providers']&&(!object(root['proxy-providers'])||Object.hasOwn(root['proxy-providers'],configured.provider)))throw issue('请用独立出口组引用专用 CN 中转 provider。');
+    visited.add(configured.group);
+    return{name:target,groups:visited,relayGroup:configured.group,provider:configured.provider};
+  }
+  return{name:target,groups:visited};
 }
 function checkRoot(root: any, name: TemplateName): void {
   if (!object(root)) throw issue('模板顶层需要是一个配置对象。');
@@ -686,7 +695,15 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
   } else if (root && doc) {
     const generated = permitted.map(yamlOutbound);
     const dialer=clashMetaDialer(root,name);
-    if(dialer){for(const proxy of generated)proxy['dialer-proxy']=dialer.name;delete root['x-mboard-dialer-proxy'];doc.delete('x-mboard-dialer-proxy');}
+    if(dialer){
+      if(dialer.provider){
+        const provider={type:'inline',override:{'dialer-proxy':dialer.name},payload:structuredClone(generated)};
+        root['proxy-providers']={...(root['proxy-providers']||{}),[dialer.provider]:provider};
+        let providersNode=doc.get('proxy-providers',true);if(isAlias(providersNode))providersNode=providersNode.resolve(doc);
+        if(isMap(providersNode))providersNode.set(dialer.provider,doc.createNode(provider));else doc.set('proxy-providers',doc.createNode(root['proxy-providers']));
+      }else for(const proxy of generated)proxy['dialer-proxy']=dialer.name;
+      delete root['x-mboard-dialer-proxy'];doc.delete('x-mboard-dialer-proxy');
+    }
     fillYaml(root, generated, names, warnings, dialer?.groups);
     // Mutate dynamic arrays in place: replacing their parent key would orphan user aliases.
     const removedAnchors = new Map<string, unknown>();
