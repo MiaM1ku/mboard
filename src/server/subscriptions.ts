@@ -55,10 +55,10 @@ export function initializeSubscriptionTemplates(db: Database): void {
       const records = db.query("SELECT payload FROM legacy_records WHERE kind='v2_subscribe_templates' ORDER BY id").all() as { payload: string }[];
       for (const record of records) {
         let row: any;
-        try { row = JSON.parse(record.payload); } catch { throw new TemplateValidationError([{ message: '归档模板数据无法读取，请检查导入文件。' }]); }
+        try { row = JSON.parse(record.payload); } catch { throw new TemplateValidationError([{ message: '请检查归档模板 JSON 格式，再重试导入。' }]); }
         if (!TEMPLATE_NAMES.includes(row?.name)) continue;
         if (!Number.isSafeInteger(Number(row.id)) || Number(row.id) <= 0 || typeof row.content !== 'string') {
-          throw new TemplateValidationError([{ message: '归档模板字段不完整，请检查导入文件。' }]);
+          throw new TemplateValidationError([{ message: '请补齐归档模板字段后重试导入。' }]);
         }
         // A later archive import may replace a minimal builtin, but never an edited or already imported template.
         const existing = getTemplate(db, row.name);
@@ -133,7 +133,7 @@ function jsonConfig(content: string): Record<string, any> {
 function assertConfigGraph(value: unknown, active = new WeakSet<object>(), depth = 0, budget = { remaining: 100_000 }): void {
   if (--budget.remaining < 0 || depth > 64) throw issue('模板结构过于复杂，请简化嵌套配置。');
   if (!value || typeof value !== 'object') return;
-  if (active.has(value)) throw issue('YAML 不能包含循环引用，请检查锚点。');
+  if (active.has(value)) throw issue('请展开 YAML 循环引用，再检查锚点。');
   active.add(value);
   for (const child of Object.values(value)) assertConfigGraph(child, active, depth + 1, budget);
   active.delete(value);
@@ -143,7 +143,7 @@ function yamlConfig(content: string): { root: Record<string, any>; doc: Document
   const problem = doc.errors[0] || doc.warnings[0];
   if (problem) {
     const p = problem.linePos?.[0] || position(content, problem.pos?.[0] || 0);
-    throw issue('YAML 格式有误或包含不支持的标签，请检查缩进和字段。', p.line, 'col' in p ? p.col : p.column);
+    throw issue('请按标准 YAML 标签、缩进和字段格式调整模板。', p.line, 'col' in p ? p.col : p.column);
   }
   let root: Record<string, any>;
   try { root = doc.toJS({ maxAliasCount: 100 }) as Record<string, any>; }
@@ -176,7 +176,7 @@ function iniConfig(content: string): IniConfig {
       if (!(section.name === 'proxy' && trimmed === '$proxies')) {
         const pair = iniPair(line);
         if (!pair || !pair.key.trim() || !pair.value.trim()) throw issue('INI 字段需要写成 名称 = 值。', index + 1, 1);
-        try { splitIni(pair.value); } catch { throw issue('INI 引号没有闭合，请检查这一行。', index + 1, 1); }
+        try { splitIni(pair.value); } catch { throw issue('请补齐这一行的 INI 引号后重试。', index + 1, 1); }
       }
     }
     section.lines.push(line);
@@ -195,27 +195,27 @@ export function validateTemplate(name: string, content: string): TemplateValidat
       const root = jsonConfig(content); checkRoot(root, format);
       // Syntax validation is not a core check. Show unsupported migrations before a modern client requests them.
       try { migrateSingboxRendered(structuredClone(root), '1.14.0', warnings); }
-      catch { warnings.push('此 sing-box 模板包含无法安全自动转换的字段，请手动提供兼容目标客户端的模板。'); }
+      catch { warnings.push('请按目标 sing-box 客户端版本手动调整这些字段，再校验模板。'); }
     }
     else if (['clash', 'clashmeta', 'stash'].includes(format)) checkRoot(yamlConfig(content).root, format);
     else iniConfig(content);
     return { valid: true, errors: [], warnings };
   } catch (error) {
-    return { valid: false, errors: error instanceof TemplateValidationError ? error.issues : [{ message: '模板无法解析，请检查格式后重试。' }], warnings: [] };
+    return { valid: false, errors: error instanceof TemplateValidationError ? error.issues : [{ message: '请检查模板格式后重试解析。' }], warnings: [] };
   }
 }
 const aliases: Record<string, TemplateName> = { singbox: 'singbox', 'sing-box': 'singbox', json: 'singbox', clash: 'clash', clashmeta: 'clashmeta', 'clash-meta': 'clashmeta', meta: 'clashmeta', mihomo: 'clashmeta', stash: 'stash', surge: 'surge', surfboard: 'surfboard' };
 export function selectSubscriptionFormat(userAgent: string | null | undefined, query: URLSearchParams | Record<string, string | undefined> = {}): TemplateName {
   const get = (key: string) => query instanceof URLSearchParams ? query.get(key) : query[key];
   // format is the most explicit option. Invalid explicit values never silently choose another format.
-  const explicit = get('format') || get('target');
+  const explicit = get('format') || get('target') || get('flag');
   if (explicit) { const selected = aliases[explicit.toLowerCase()]; if (!selected) throw issue('请选择支持的订阅格式。'); return selected; }
   const ua = userAgent || '';
   if (/surfboard/i.test(ua)) return 'surfboard';
   if (/surge/i.test(ua)) return 'surge';
   if (/stash/i.test(ua)) return 'stash';
   if (/sing[- ]?box|hiddify|\bsfm\b/i.test(ua)) return 'singbox';
-  if (/mihomo|clash(?:x)?[\s-]*meta|verge|flclash|nekobox|nekoray/i.test(ua)) return 'clashmeta';
+  if (/mihomo|clash(?:x)?[\s._-]*meta|verge|flclash|nekobox|nekoray/i.test(ua)) return 'clashmeta';
   if (/clash/i.test(ua)) return 'clash';
   return 'singbox';
 }
@@ -297,7 +297,7 @@ function yamlOutbound(e: SubscriptionEndpoint): Record<string, any> {
 }
 /** Quote INI tokens, including commas, equals signs and backslashes; never interpolate raw line breaks. */
 function iniToken(value: string): string {
-  if (/[\r\n\0]/.test(value)) throw issue('节点字段包含不支持的换行字符。');
+  if (/[\r\n\0]/.test(value)) throw issue('请将节点字段中的换行改为单行文本。');
   return /[,=\\"#;]|^\s|\s$|^\[|^\/\//.test(value) ? `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"` : value;
 }
 function iniOutbound(e: SubscriptionEndpoint, name: TemplateName): string {
@@ -334,7 +334,7 @@ function patternMatcher(pattern: string, warnings: string[], delimitedOnly = fal
  */
 function migrateSingboxRendered(root: Record<string, any>, clientVersion: string | undefined, warnings: string[] = []): void {
   if (!clientVersion || older(clientVersion, '1.12.0')) return;
-  const unsupported = () => { throw issue('此 sing-box 模板无法安全转换，请手动提供兼容目标客户端的模板。'); };
+  const unsupported = () => { throw issue('请按目标 sing-box 客户端版本提供兼容模板后重试。'); };
   const rootKeys = new Set(['log', 'dns', 'ntp', 'inbounds', 'outbounds', 'endpoints', 'route', 'experimental', 'certificate_providers', 'services', 'network_namespaces', 'http_clients']);
   if (Object.keys(root).some(key => !rootKeys.has(key))) unsupported();
   const route = root.route ?? {}, dns = root.dns;
@@ -463,7 +463,7 @@ function migrateSingboxRendered(root: Record<string, any>, clientVersion: string
       if (inbound.sniff === true) {
         prefix.push({ inbound: [inbound.tag], action: 'sniff', ...(inbound.sniff_timeout ? { timeout: inbound.sniff_timeout } : {}) });
         // Modern sniff actions classify the domain but cannot reproduce the removed destination override.
-        if (inbound.sniff_override_destination === true) warn(warnings, '新版 sing-box 的 sniff 动作保留域名识别和路由匹配，但不再用识别到的域名覆盖连接目标；依赖旧版 sniff_override_destination 的模板需要手动调整。');
+        if (inbound.sniff_override_destination === true) warn(warnings, '新版 sing-box 的 sniff 按识别域名匹配路由，连接使用原始目标；旧版 sniff_override_destination 的目标覆盖需求请按客户端版本调整模板。');
       }
       if (inbound.udp_disable_domain_unmapping) prefix.push({ inbound: [inbound.tag], action: 'route-options', udp_disable_domain_unmapping: true });
     }
@@ -497,7 +497,7 @@ function fillSingbox(root: Record<string, any>, generated: Record<string, any>[]
     }
     delete group.include; delete group.exclude; delete group.fallback;
     group.outbounds = [...new Set([...group.outbounds, ...chosen])].filter(v => v !== group.tag);
-    if (!group.outbounds.length) warn(warnings, '部分出站分组没有可用节点，请检查分组筛选或 fallback。');
+    if (!group.outbounds.length) warn(warnings, '请调整出站分组筛选或 fallback，让分组匹配可用节点。');
   }
   root.outbounds.push(...generated);
 }
@@ -513,7 +513,7 @@ function fillYaml(root: Record<string, any>, generated: Record<string, any>[], n
     }
     if (!filtered) members.push(...names);
     group.proxies = [...new Set(members)].filter(n => n !== group.name);
-    if (!group.proxies.length && !(Array.isArray(group.use) && group.use.length)) warn(warnings, '部分代理分组没有可用节点，请检查分组筛选。');
+    if (!group.proxies.length && !(Array.isArray(group.use) && group.use.length)) warn(warnings, '请调整代理分组筛选，让分组匹配可用节点。');
   }
   // Keep empty provider-backed groups and nested group references; deleting them can invalidate user rules.
 }
@@ -525,7 +525,7 @@ function splitIni(value: string): string[] {
     if (char === '"') { quoted = !quoted; part += char; continue; }
     if (char === ',' && !quoted) { parts.push(part.trim()); part = ''; } else part += char;
   }
-  if (quoted || escaped) throw issue('INI 引号没有闭合，请检查字段。');
+  if (quoted || escaped) throw issue('请补齐 INI 字段的闭合引号后重试。');
   parts.push(part.trim()); return parts;
 }
 function iniPair(line: string): { key: string; value: string } | null {
@@ -614,7 +614,7 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
     reserved.add('DIRECT'); reserved.add('REJECT');
   }
   for (const endpoint of endpoints) {
-    if (!eligible(endpoint, name, options)) { warn(warnings, '部分节点的协议、参数或客户端版本不兼容，已经跳过。'); continue; }
+    if (!eligible(endpoint, name, options)) { warn(warnings, '请按目标客户端版本和协议参数配置节点，再刷新输出。'); continue; }
     let nodeName = endpoint.name; let n = 2;
     while (reserved.has(nodeName)) nodeName = `${endpoint.name} (${n++})`;
     reserved.add(nodeName); permitted.push({ ...endpoint, name: nodeName });
@@ -692,7 +692,7 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
     if (removedAnchors.size) visit(doc, { Alias(_key, node) {
       if (removedAnchors.has(node.source)) return doc!.createNode(removedAnchors.get(node.source));
     } });
-    try { content = String(doc); } catch { throw issue('YAML 动态分组的引用无法解析，请检查锚点。'); }
+    try { content = String(doc); } catch { throw issue('请检查 YAML 动态分组锚点，再重试解析。'); }
   } else content = fillIni(ini!, permitted.map(e => iniOutbound(e, name)), names, warnings);
   return { template_name: name, content_type: name === 'singbox' ? 'application/json; charset=utf-8' : root ? 'text/yaml; charset=utf-8' : 'text/plain; charset=utf-8', content, node_count: permitted.length, warnings };
 }

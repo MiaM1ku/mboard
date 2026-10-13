@@ -71,7 +71,7 @@ export function createApp(options: AppOptions = {}) {
     const url = new URL(req.url);
     const host = hostName(req.headers.get('host') ?? url.host);
     if (host === subscriptionHost) {
-      if (['GET', 'HEAD'].includes(req.method.toUpperCase()) && /^\/s\/[a-f0-9]{64}$/.test(url.pathname)) return;
+      if (['GET', 'HEAD'].includes(req.method.toUpperCase()) && (/^\/s\/(?:[a-f0-9]{64}|[A-Za-z0-9_-]{32})$/.test(url.pathname) || (url.pathname==='/api/v1/client/subscribe'&&/^[A-Za-z0-9_-]{32}$/.test(url.searchParams.get('token')||'')))) return;
     } else if (host && (host === panelHost || ['localhost', '127.0.0.1', '[::1]'].includes(host))) return;
     fail(404, 'NOT_FOUND', '此地址提供订阅下载，请使用有效的订阅链接');
   };
@@ -346,8 +346,10 @@ export function createApp(options: AppOptions = {}) {
       return json(userView(fresh), 200, newSession(req, u.id));
     }
     if (path === '/api/v1/auth/logout' && method === 'POST') { run('DELETE FROM sessions WHERE token_hash=?', sessionHash(req)); return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie(req, '', 0) }); }
-    if (path.startsWith('/s/') && ['GET', 'HEAD'].includes(method)) {
-      const token = path.slice(3); const u = /^[a-f0-9]{64}$/.test(token) ? get('SELECT * FROM users WHERE subscription_token=?', token) : null;
+    if ((path.startsWith('/s/')||path==='/api/v1/client/subscribe') && ['GET', 'HEAD'].includes(method)) {
+      const token = path.startsWith('/s/')?path.slice(3):url.searchParams.get('token')||'';
+      let u:Row|null=/^[a-f0-9]{64}$/.test(token)?get('SELECT * FROM users WHERE subscription_token=?',token):null;
+      if(!u&&/^[A-Za-z0-9_-]{32}$/.test(token)){const legacy=get('SELECT id FROM legacy_records WHERE kind=? AND json_extract(payload,\'$.token\')=? LIMIT 1','v2_user',token);if(legacy&&!get('SELECT 1 FROM runtime_metadata WHERE key=?',`user:${legacy.id}:legacy-sub-retired`))u=get('SELECT * FROM users WHERE id=?',Number(legacy.id))}
       if (!u) fail(404, 'NOT_FOUND', '请确认订阅链接');
       if (!active(u)) fail(403, 'SUBSCRIPTION_UNAVAILABLE', '订阅待恢复，请确认账号状态、到期时间和流量额度');
       const rendered = renderedSubscription(u,req);
@@ -374,7 +376,7 @@ export function createApp(options: AppOptions = {}) {
       return json({ ok: true });
     }
     if (path === '/api/v1/me/subscription/rotate' && method === 'POST') {
-      const token = secret(); atomic(() => { const credential=crypto.randomUUID();run('UPDATE users SET subscription_token=?,credential=? WHERE id=?', token, credential, u.id);rotateRuntimeIdentities(db,u.id,credential);bump(); audit(u, 'subscription.rotate', u.id); }); return json({ subscription_token: token, ...(subscriptionURL(token) ? { subscription_url: subscriptionURL(token) } : {}) });
+      const token = secret(); atomic(() => { const credential=crypto.randomUUID();run('UPDATE users SET subscription_token=?,credential=? WHERE id=?', token, credential, u.id);rotateRuntimeIdentities(db,u.id,credential);run('INSERT OR REPLACE INTO runtime_metadata(key,value) VALUES(?,?)',`user:${u.id}:legacy-sub-retired`,stamp());bump(); audit(u, 'subscription.rotate', u.id); }); return json({ subscription_token: token, ...(subscriptionURL(token) ? { subscription_url: subscriptionURL(token) } : {}) });
     }
     if (path === '/api/v1/nodes' && method === 'GET') return json(userNodes(u));
     if (path === '/api/v1/traffic' && method === 'GET') { const raw = url.searchParams.get('days') ?? '30'; if (!/^\d+$/.test(raw)) fail(400, 'VALIDATION', '请填写 1 到 366 天的范围'); return json(traffic(u.id, integer(Number(raw), '天数', 1, 366))); }

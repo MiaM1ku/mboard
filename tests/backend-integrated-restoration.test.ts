@@ -44,6 +44,8 @@ function fixture(options: AppOptions = {}) {
   return {app,db,request,node,activate,archive,token,userCookie,adminCookie,record,heartbeat,counts};
 }
 
+test('imported legacy subscription links keep format selection until owner rotation',async()=>{const f=fixture({publicOrigin:'https://panel.example.test',subscriptionOrigin:'https://sub.example.test'}),old='legacySubscriptionKey'.padEnd(32,'x');f.db.query('UPDATE legacy_records SET payload=? WHERE kind=? AND id=?').run(JSON.stringify({id:1,uuid:oldUUID,token:old}),'v2_user','1');f.activate();await f.heartbeat();for(const path of[`/s/${old}`,`/api/v1/client/subscribe?token=${old}&flag=clashmeta`]){const r=await f.request(path,'GET',undefined,undefined,{Host:'sub.example.test','User-Agent':'clash.meta/1.19.0'});expect(r.status).toBe(200);expect(r.response.headers.get('content-type')).toContain('yaml');expect(parse(r.text).proxies.length).toBeGreaterThan(0)}const before=compileMachine(f.db,2).config.inbounds[0].users[0].password;expect((await f.request('/api/v1/me/subscription/rotate','POST',undefined,f.userCookie,{Host:'panel.example.test'})).status).toBe(200);expect((await f.request(`/s/${old}`,'GET',undefined,undefined,{Host:'sub.example.test'})).status).toBe(404);expect(compileMachine(f.db,2).config.inbounds[0].users[0].password).not.toBe(before)});
+
 describe('restored runtime REST integration', () => {
   test('runtime bearer selects native config, exposes no bundle files, and keeps server secrets inside authorized config', async () => {
     const f=fixture(); const r=await f.node('config'); expect(r.status).toBe(200);

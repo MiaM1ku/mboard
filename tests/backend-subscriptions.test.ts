@@ -68,7 +68,7 @@ test('archive imported after first startup replaces only builtin defaults, never
 });
 test('invalid archive payload rolls back instead of silently replacing the user content with defaults', () => {
   const db = database(); db.exec("CREATE TABLE legacy_records(kind TEXT,id TEXT,payload TEXT); INSERT INTO legacy_records VALUES ('v2_subscribe_templates','1','bad secret payload');");
-  expect(() => initializeSubscriptionTemplates(db)).toThrow('归档模板数据无法读取');
+  expect(() => initializeSubscriptionTemplates(db)).toThrow('请检查归档模板 JSON 格式');
   expect(db.query("SELECT name FROM sqlite_master WHERE name='subscription_templates'").get()).toBeNull();
 });
 test('save validates first, keeps exact original whitespace, and has no partial update on failure', () => {
