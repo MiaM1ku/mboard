@@ -190,10 +190,16 @@ export function validateTemplate(name: string, content: string): TemplateValidat
     if (typeof content !== 'string' || !content.trim()) throw issue('请输入模板内容。');
     if (new TextEncoder().encode(content).length > MAX_TEMPLATE_BYTES) throw issue('模板内容请控制在 512 KiB 以内，缩小后重试。');
     if (content.includes('\0')) throw issue('请清理模板中的空字符后重试。');
-    if (format === 'singbox') checkRoot(jsonConfig(content), format);
+    const warnings: string[] = [];
+    if (format === 'singbox') {
+      const root = jsonConfig(content); checkRoot(root, format);
+      // Syntax validation is not a core check. Show unsupported migrations before a modern client requests them.
+      try { migrateSingboxRendered(structuredClone(root), '1.14.0', warnings); }
+      catch { warnings.push('此 sing-box 模板包含无法安全自动转换的字段，请手动提供兼容目标客户端的模板。'); }
+    }
     else if (['clash', 'clashmeta', 'stash'].includes(format)) checkRoot(yamlConfig(content).root, format);
     else iniConfig(content);
-    return { valid: true, errors: [], warnings: [] };
+    return { valid: true, errors: [], warnings };
   } catch (error) {
     return { valid: false, errors: error instanceof TemplateValidationError ? error.issues : [{ message: '模板无法解析，请检查格式后重试。' }], warnings: [] };
   }
@@ -214,9 +220,14 @@ export function selectSubscriptionFormat(userAgent: string | null | undefined, q
   return 'singbox';
 }
 function version(options: RenderOptions, name: TemplateName): string | undefined {
+  if (name === 'singbox') {
+    if (options.clientVersion) return /^\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?$/.test(options.clientVersion) ? options.clientVersion : undefined;
+    // SFA/SFI/SFM report the bundled core version. Do not infer versions from unrelated app names.
+    return (options.userAgent || '').match(/(?:\bsing[- ]?box|\bSFA|\bSFI|\bSFM)[/ ]v?(\d+\.\d+(?:\.\d+)?)/i)?.[1];
+  }
   if (options.clientVersion) return options.clientVersion;
   const ua = options.userAgent || '';
-  const prefix = name === 'singbox' ? 'sing[- ]?box' : name === 'clashmeta' ? '(?:mihomo|clash.?meta)' : name;
+  const prefix = name === 'clashmeta' ? '(?:mihomo|clash.?meta)' : name;
   return ua.match(new RegExp(`${prefix}[\\s/v-]*v?(\\d+\\.\\d+(?:\\.\\d+)?)`, 'i'))?.[1];
 }
 function older(actual: string | undefined, required: string): boolean {
@@ -317,6 +328,158 @@ function patternMatcher(pattern: string, warnings: string[], delimitedOnly = fal
   }
   try { const re = new RegExp(source, [...new Set(flags.replace(/[gy]/g, ''))].join('')); return text => re.test(text.slice(0, 256)); }
   catch { warn(warnings, '部分分组筛选表达式无效，已经忽略。'); return () => false; }
+}
+/** Render-time subset of https://sing-box.sagernet.org/migration/ (available since 1.12).
+ * Work on the parsed render copy only. Unsupported semantics fail closed instead of deleting user rules.
+ */
+function migrateSingboxRendered(root: Record<string, any>, clientVersion: string | undefined, warnings: string[] = []): void {
+  if (!clientVersion || older(clientVersion, '1.12.0')) return;
+  const unsupported = () => { throw issue('此 sing-box 模板无法安全转换，请手动提供兼容目标客户端的模板。'); };
+  const rootKeys = new Set(['log', 'dns', 'ntp', 'inbounds', 'outbounds', 'endpoints', 'route', 'experimental', 'certificate_providers', 'services', 'network_namespaces', 'http_clients']);
+  if (Object.keys(root).some(key => !rootKeys.has(key))) unsupported();
+  const route = root.route ?? {}, dns = root.dns;
+  if (!object(route) || (dns !== undefined && !object(dns)) || (root.inbounds !== undefined && (!Array.isArray(root.inbounds) || root.inbounds.some((inbound: any) => !object(inbound))))) unsupported();
+  if (route.geoip !== undefined || route.geosite !== undefined || dns?.fakeip !== undefined) unsupported();
+  let routeChanged = false;
+  const eachRule = (rules: any, fn: (rule: Record<string, any>) => void) => {
+    if (rules === undefined) return;
+    if (!Array.isArray(rules)) unsupported();
+    const walk = (rule: any) => {
+      if (!object(rule) || rule.geoip !== undefined || rule.geosite !== undefined || rule.source_geoip !== undefined) unsupported();
+      fn(rule);
+      if (rule.rules !== undefined) { if (!Array.isArray(rule.rules)) unsupported(); rule.rules.forEach(walk); }
+    };
+    rules.forEach(walk);
+  };
+  // An outbound:any DNS matcher describes internal dial resolution, NOT all incoming DNS queries.
+  // Making it an unconditional DNS route would erase the clash-mode/rule-set routing below it.
+  if (dns?.rules !== undefined) {
+    if (!Array.isArray(dns.rules)) unsupported();
+    dns.rules = dns.rules.filter((rule: any, index: number) => {
+      if (!object(rule) || rule.outbound === undefined) return true;
+      const outbound = Array.isArray(rule.outbound) ? rule.outbound : [rule.outbound];
+      const keys = ['outbound', 'server', 'action', 'strategy', 'disable_cache', 'rewrite_ttl', 'client_subnet'];
+      if (index !== 0 || outbound.length !== 1 || outbound[0] !== 'any' || typeof rule.server !== 'string' || (rule.action && rule.action !== 'route') || Object.keys(rule).some(key => !keys.includes(key))) unsupported();
+      if (route.default_domain_resolver !== undefined) unsupported();
+      const { outbound: _outbound, action: _action, ...resolver } = rule;
+      route.default_domain_resolver = Object.keys(resolver).length === 1 ? resolver.server : resolver;
+      routeChanged = true; return false;
+    });
+    eachRule(dns.rules, rule => { if (rule.outbound !== undefined) unsupported(); });
+  }
+  const rcodeTags = new Map<string, string>();
+  if (dns?.servers !== undefined) {
+    if (!Array.isArray(dns.servers)) unsupported();
+    const implicitDnsFinal = dns.servers[0]?.tag;
+    dns.servers = dns.servers.flatMap((server: any) => {
+      if (!object(server)) unsupported();
+      if (server.address === undefined) return [server];
+      if (server.type !== undefined || typeof server.address !== 'string') unsupported();
+      // Per-server query strategy/subnet cannot be moved without changing rule precedence.
+      const keys = ['tag', 'address', 'detour', 'address_resolver', 'address_strategy'];
+      if (Object.keys(server).some(key => !keys.includes(key))) unsupported();
+      if (server.address.startsWith('rcode://')) {
+        const codes: Record<string, string> = { success: 'NOERROR', format_error: 'FORMERR', server_failure: 'SERVFAIL', name_error: 'NXDOMAIN', not_implemented: 'NOTIMP', refused: 'REFUSED' };
+        const code = codes[server.address.slice(8)];
+        if (!code || typeof server.tag !== 'string' || Object.keys(server).some(key => !['tag', 'address'].includes(key))) unsupported();
+        rcodeTags.set(server.tag, code); return [];
+      }
+      const { address, address_resolver, address_strategy, detour, ...converted } = server;
+      if (address === 'local') {
+        if (address_resolver || address_strategy || detour) unsupported();
+        converted.type = 'local';
+      } else {
+        let url: URL;
+        try { url = new URL(address.includes('://') ? address : `udp://${address}`); } catch { return unsupported(); }
+        const type = url.protocol.slice(0, -1);
+        if (!['https', 'h3', 'tcp', 'udp', 'tls', 'quic'].includes(type) || !url.hostname || url.username || url.password || url.hash || url.search) unsupported();
+        if (!['https', 'h3'].includes(type) && url.pathname && url.pathname !== '/') unsupported();
+        converted.type = type; converted.server = url.hostname.replace(/^\[|\]$/g, '');
+        if (url.port) converted.server_port = Number(url.port);
+        if (['https', 'h3'].includes(type)) {
+          const explicitPath = address.slice(address.indexOf('://') + 3).includes('/');
+          if (explicitPath) converted.path = url.pathname;
+        }
+        if (address_resolver) converted.domain_resolver = address_strategy ? { server: address_resolver, strategy: address_strategy } : address_resolver;
+        else if (address_strategy) unsupported();
+        // New DNS servers dial directly by default. Old empty detour used the default outbound.
+        const target = detour || route.final || root.outbounds[0]?.tag;
+        const direct = root.outbounds.find((outbound: any) => outbound.tag === target && outbound.type === 'direct');
+        if (direct && Object.keys(direct).every(key => ['tag', 'type'].includes(key))) { /* empty direct dialer */ }
+        else if (target) converted.detour = target;
+        else unsupported();
+      }
+      return [converted];
+    });
+    if (rcodeTags.has(dns.final || implicitDnsFinal) || rcodeTags.has(typeof route.default_domain_resolver === 'string' ? route.default_domain_resolver : route.default_domain_resolver?.server)) unsupported();
+    eachRule(dns.rules, rule => {
+      if (!rcodeTags.has(rule.server)) return;
+      if ((rule.action && rule.action !== 'route') || Object.keys(rule).some(key => ['strategy', 'disable_cache', 'rewrite_ttl', 'client_subnet'].includes(key))) unsupported();
+      rule.rcode = rcodeTags.get(rule.server); rule.action = 'predefined'; delete rule.server;
+    });
+  }
+  const special = new Map<string, string>();
+  for (const outbound of root.outbounds) {
+    if (outbound.type === 'wireguard' || outbound.override_address !== undefined || outbound.override_port !== undefined) unsupported();
+    if (!['block', 'dns'].includes(outbound.type)) continue;
+    if (Object.keys(outbound).some(key => !['type', 'tag'].includes(key))) unsupported();
+    special.set(outbound.tag, outbound.type === 'block' ? 'reject' : 'hijack-dns');
+  }
+  if (!route.final && special.has(root.outbounds[0]?.tag)) unsupported();
+  eachRule(route.rules, rule => {
+    if (!special.has(rule.outbound)) return;
+    if (rule.action && rule.action !== 'route') unsupported();
+    rule.action = special.get(rule.outbound); delete rule.outbound;
+  });
+  // Special outbounds cannot be represented as selector members, detours or final/default targets.
+  const checkReferences = (value: any) => {
+    if (!value || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) {
+      if (['outbound', 'outbounds', 'detour', 'download_detour', 'final', 'default'].includes(key)) {
+        const refs = Array.isArray(child) ? child : [child];
+        if (refs.some(ref => typeof ref === 'string' && special.has(ref))) unsupported();
+      }
+      if (['domain_resolver', 'default_domain_resolver'].includes(key) && rcodeTags.has(typeof child === 'string' ? child : (child as any)?.server)) unsupported();
+      checkReferences(child);
+    }
+  };
+  // DNS server names occupy a separate namespace from outbound tags.
+  checkReferences({ ...root, dns: undefined, outbounds: root.outbounds.filter((outbound: any) => !special.has(outbound.tag)) });
+  if (dns?.servers?.some((server: any) => special.has(server.detour) || rcodeTags.has(typeof server.domain_resolver === 'string' ? server.domain_resolver : server.domain_resolver?.server))) unsupported();
+  root.outbounds = root.outbounds.filter((outbound: any) => !special.has(outbound.tag));
+  const prefix: Record<string, any>[] = [];
+  const inboundTags = new Set((root.inbounds || []).map((inbound: any) => inbound.tag));
+  for (const [index, inbound] of (root.inbounds || []).entries()) {
+    if (!object(inbound)) unsupported();
+    if (['inet4_address', 'inet6_address', 'inet4_route_address', 'inet6_route_address', 'inet4_route_exclude_address', 'inet6_route_exclude_address'].some(key => inbound[key] !== undefined)) unsupported();
+    if (inbound.type === 'tun') { delete inbound.endpoint_independent_nat; delete inbound.gso; }
+    if (inbound.sniff === true || (inbound.domain_strategy && inbound.domain_strategy !== 'as_is') || inbound.udp_disable_domain_unmapping) {
+      if (!inbound.tag) {
+        const base = `mboard-in-${index + 1}`; let tag = base, suffix = 2;
+        while (inboundTags.has(tag)) tag = `${base}-${suffix++}`;
+        inbound.tag = tag; inboundTags.add(tag);
+      }
+      if (inbound.domain_strategy && inbound.domain_strategy !== 'as_is') prefix.push({ inbound: [inbound.tag], action: 'resolve', strategy: inbound.domain_strategy });
+      if (inbound.sniff === true) {
+        prefix.push({ inbound: [inbound.tag], action: 'sniff', ...(inbound.sniff_timeout ? { timeout: inbound.sniff_timeout } : {}) });
+        // Modern sniff actions classify the domain but cannot reproduce the removed destination override.
+        if (inbound.sniff_override_destination === true) warn(warnings, '新版 sing-box 的 sniff 动作保留域名识别和路由匹配，但不再用识别到的域名覆盖连接目标；依赖旧版 sniff_override_destination 的模板需要手动调整。');
+      }
+      if (inbound.udp_disable_domain_unmapping) prefix.push({ inbound: [inbound.tag], action: 'route-options', udp_disable_domain_unmapping: true });
+    }
+    for (const key of ['sniff', 'sniff_override_destination', 'sniff_timeout', 'domain_strategy', 'udp_disable_domain_unmapping']) delete inbound[key];
+  }
+  if (prefix.length) { route.rules = [...prefix, ...(route.rules || [])]; routeChanged = true; }
+  for (const outbound of root.outbounds) {
+    if (outbound.domain_strategy === undefined) continue;
+    if (outbound.domain_strategy && outbound.domain_strategy !== 'as_is') {
+      const resolver = outbound.domain_resolver ?? route.default_domain_resolver;
+      if (!resolver) unsupported();
+      outbound.domain_resolver = { ...(typeof resolver === 'string' ? { server: resolver } : resolver), strategy: outbound.domain_strategy };
+    }
+    delete outbound.domain_strategy;
+  }
+  if (routeChanged) root.route = route;
 }
 function fillSingbox(root: Record<string, any>, generated: Record<string, any>[], names: string[], warnings: string[]) {
   const tags = new Set<string>(root.outbounds.map((v: any) => v.tag));
@@ -478,7 +641,9 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
         generated.push(entry);
       }
     }
-    fillSingbox(root!, generated, names, warnings); content = JSON.stringify(root, null, 2) + '\n';
+    fillSingbox(root!, generated, names, warnings);
+    migrateSingboxRendered(root!, version(options, 'singbox'), warnings);
+    content = JSON.stringify(root, null, 2) + '\n';
   } else if (root && doc) {
     const generated = permitted.map(yamlOutbound);
     fillYaml(root, generated, names, warnings);

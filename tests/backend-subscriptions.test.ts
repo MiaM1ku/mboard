@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
@@ -371,3 +372,124 @@ test('preview and actual subscriptions share one result contract and only their 
   expect(Object.keys(preview).sort()).toEqual(['content', 'content_type', 'node_count', 'template_name', 'warnings']);
   expect(preview.content).toContain('preview-only'); expect(real.content).not.toContain('preview-only'); expect(preview.content).not.toContain('synthetic-password');
 });
+
+// Public PHP resource only: never read an archive, database or customer endpoint for these fixtures.
+const phpSingboxDefault = readFileSync(new URL('../../Xboard/resources/rules/default.sing-box.json', import.meta.url), 'utf8');
+const legacySingboxDefault = phpSingboxDefault + ' '.repeat(Math.max(0, 4095 - Buffer.byteLength(phpSingboxDefault)));
+const realityEndpoint = (host: string): SubscriptionEndpoint => endpoint({
+  name: '合成 Reality', protocol: 'vless', host, credential: '00000000-0000-4000-8000-000000000001',
+  settings: { flow: 'xtls-rprx-vision', tls: { enabled: true, server_name: 'reality.example.test', utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: 'hSDwCYkwp1R0i33ctD73Wg2_Og0mOBr066SpjqqbTmo', short_id: '0123456789abcdef' } } },
+});
+
+test('4095-byte synthetic semantic PHP default stays exact at rest and older/unknown renders keep the previous output', () => {
+  expect(Buffer.byteLength(legacySingboxDefault)).toBe(4095);
+  expect(JSON.parse(legacySingboxDefault)).toEqual(JSON.parse(phpSingboxDefault));
+  const db = database(); const contents = { ...synthetic, singbox: legacySingboxDefault };
+  legacy(db, contents); initializeSubscriptionTemplates(db);
+  const original = getTemplate(db, 'singbox')!, nodes = [realityEndpoint('192.0.2.1')];
+  const expected = JSON.parse(legacySingboxDefault);
+  expected.outbounds.filter((outbound: any) => ['selector', 'urltest'].includes(outbound.type)).forEach((outbound: any) => outbound.outbounds.push(nodes[0]!.name));
+  expected.outbounds.push({ ...nodes[0]!.settings, type: 'vless', tag: nodes[0]!.name, server: nodes[0]!.host, server_port: 443, uuid: nodes[0]!.credential });
+  const previousOutput = JSON.stringify(expected, null, 2) + '\n';
+  for (const options of [{}, { userAgent: 'mboard-subscription-verifier' }, { userAgent: 'sing-box/1.10.7' }, { clientVersion: 'unknown', userAgent: 'sing-box/1.14.3' }]) {
+    expect(renderSubscription(original, nodes, options).content).toBe(previousOutput);
+  }
+  renderSubscription(original, nodes, { userAgent: 'sing-box/1.14.3' });
+  initializeSubscriptionTemplates(db);
+  for (const name of TEMPLATE_NAMES) expect(getTemplate(db, name)!.content).toBe(contents[name]);
+});
+
+test('known 1.12+ core versions migrate DNS resolution, sniff scope and special actions without losing rule sets or Chinese groups', () => {
+  const source = JSON.parse(legacySingboxDefault), nodes = [realityEndpoint('node.example.test')];
+  for (const options of [{ userAgent: 'sing-box/1.12.0' }, { userAgent: 'sing-box/1.14.3' }, { userAgent: 'SFA/1.14.3' }, { userAgent: 'SFM/1.14.3' }, { clientVersion: '1.14.3', userAgent: 'unknown' }]) {
+    const rendered = renderSubscription(template('singbox', legacySingboxDefault), nodes, options), root = JSON.parse(rendered.content);
+    expect(rendered.warnings).toHaveLength(1); expect(rendered.warnings[0]).toContain('sniff_override_destination');
+    expect(root.dns.servers).toEqual([
+      { type: 'https', tag: 'remote', server: '1.1.1.1', path: '/dns-query', detour: '节点选择' },
+      { type: 'https', tag: 'local', server: '223.5.5.5', path: '/dns-query' },
+    ]);
+    expect(root.dns.rules).toEqual(source.dns.rules.slice(1));
+    expect(root.dns.strategy).toBe('prefer_ipv4'); expect(root.route.default_domain_resolver).toBe('local');
+    expect(root.route.rule_set).toEqual(source.route.rule_set); expect(root.experimental).toEqual(source.experimental);
+    expect(root.route.rules.slice(6)).toEqual([{ protocol: 'dns', action: 'hijack-dns' }, ...source.route.rules.slice(1)]);
+    const tags = root.inbounds.map((inbound: any) => inbound.tag);
+    expect(tags).toEqual(['mboard-in-1', 'socks-in', 'mixed-in']);
+    for (const [index, tag] of tags.entries()) {
+      expect(root.route.rules[index * 2]).toEqual({ inbound: [tag], action: 'resolve', strategy: 'prefer_ipv4' });
+      expect(root.route.rules[index * 2 + 1]).toEqual({ inbound: [tag], action: 'sniff' });
+    }
+    for (const inbound of root.inbounds) for (const key of ['sniff', 'sniff_override_destination', 'domain_strategy', 'endpoint_independent_nat']) expect(inbound[key]).toBeUndefined();
+    expect(root.outbounds.some((outbound: any) => ['block', 'dns'].includes(outbound.type))).toBe(false);
+    expect(root.outbounds[0]).toMatchObject({ tag: '节点选择', default: '自动选择', outbounds: ['自动选择', nodes[0]!.name] });
+    expect(root.outbounds.at(-1)).toMatchObject({ server: 'node.example.test', tls: nodes[0]!.settings!.tls });
+  }
+});
+
+test('sniff destination override limits are surfaced for modern conversion, not unchanged legacy output', () => {
+  expect(validateTemplate('singbox', legacySingboxDefault).warnings.join('')).toContain('sniff_override_destination');
+  expect(renderSubscription(template('singbox', legacySingboxDefault), [realityEndpoint('192.0.2.1')], { userAgent: 'sing-box/1.10.7' }).warnings).toEqual([]);
+  const root = JSON.parse(legacySingboxDefault);
+  root.inbounds.forEach((inbound: any) => { inbound.sniff_override_destination = false; });
+  expect(renderSubscription(template('singbox', JSON.stringify(root)), [realityEndpoint('192.0.2.1')], { userAgent: 'sing-box/1.14.3' }).warnings).toEqual([]);
+});
+
+test('modern migration rewrites referenced rcode/block/DNS logical rules and allocates collision-free inbound tags', () => {
+  const source = JSON.parse(legacySingboxDefault);
+  source.inbounds[1].tag = 'mboard-in-1'; source.inbounds[1].sniff_timeout = '1s';
+  source.dns.rules.push({ domain_suffix: ['blocked.example.test'], server: 'block' });
+  source.route.rules.push({ type: 'logical', mode: 'or', rules: [{ domain_suffix: ['blocked.example.test'] }, { domain: ['blocked.test'] }], outbound: 'block' });
+  const root = JSON.parse(renderSubscription(template('singbox', JSON.stringify(source)), [realityEndpoint('192.0.2.1')], { userAgent: 'sing-box/1.14.3' }).content);
+  expect(root.inbounds[0].tag).toBe('mboard-in-1-2');
+  expect(root.route.rules[3]).toEqual({ inbound: ['mboard-in-1'], action: 'sniff', timeout: '1s' });
+  expect(root.dns.rules.at(-1)).toEqual({ domain_suffix: ['blocked.example.test'], action: 'predefined', rcode: 'NOERROR' });
+  expect(root.route.rules.at(-1)).toEqual({ type: 'logical', mode: 'or', rules: source.route.rules.at(-1).rules, action: 'reject' });
+});
+
+test('unsupported semantic migrations warn at syntax validation and fail modern rendering without deleting user config', () => {
+  for (const patch of [
+    (root: any) => { root.custom_unknown = { secret: 'not-for-errors' }; },
+    (root: any) => { root.outbounds[0].outbounds.push('block'); },
+    (root: any) => { root.dns.rules[0].domain_suffix = ['private.example.test']; },
+    (root: any) => { root.dns.servers[0].strategy = 'ipv6_only'; },
+    (root: any) => { root.route.rules.push({ geoip: ['cn'], outbound: 'direct' }); },
+    (root: any) => { root.dns.rules.unshift({ domain_suffix: ['priority.example.test'], server: 'remote' }); },
+    (root: any) => { root.dns.servers.unshift(root.dns.servers.pop()); },
+    (root: any) => { root.outbounds.unshift(root.outbounds.splice(2, 1)[0]); },
+    (root: any) => { root.outbounds[1].domain_resolver = 'block'; },
+  ]) {
+    const root = JSON.parse(legacySingboxDefault); patch(root); const content = JSON.stringify(root);
+    const validation = validateTemplate('singbox', content);
+    expect(validation.valid).toBe(true); expect(validation.warnings.join('')).toContain('手动'); expect(validation.warnings.join('')).not.toContain('not-for-errors');
+    expect(() => renderSubscription(template('singbox', content), [realityEndpoint('192.0.2.1')], { userAgent: 'sing-box/1.14.3' })).toThrow(TemplateValidationError);
+    expect(JSON.parse(renderSubscription(template('singbox', content), [], { userAgent: 'sing-box/1.10.7' }).content).dns).toEqual(root.dns);
+  }
+});
+
+test('the five other formats render identically regardless of a sing-box user agent or explicit core version', () => {
+  for (const name of TEMPLATE_NAMES.filter(name => name !== 'singbox')) {
+    const original = template(name, synthetic[name]);
+    const prior = renderSubscription(original, [endpoint()]);
+    const modern = renderSubscription(original, [endpoint()], { userAgent: 'sing-box/1.14.3', clientVersion: '1.14.3' });
+    expect(modern).toEqual(prior); expect(original.content).toBe(synthetic[name]);
+  }
+});
+
+const singboxCore = process.env.MBOARD_SINGBOX_TEST_CORE || '/tmp/mboard-core-build/sing-box';
+test.skipIf(!existsSync(singboxCore))('pinned sing-box 1.14.3 check accepts two synthetic native Reality renders of the PHP default', () => {
+  const coreVersion = spawnSync(singboxCore, ['version'], { encoding: 'utf8' });
+  expect(coreVersion.status).toBe(0); expect(coreVersion.stdout).toContain('sing-box version 1.14.3');
+  for (const [index, host] of ['192.0.2.1', 'node.example.test'].entries()) {
+    const source = JSON.parse(legacySingboxDefault);
+    if (index === 1) {
+      source.dns.rules.push({ domain_suffix: ['blocked.example.test'], server: 'block' });
+      source.route.rules.push({ domain_suffix: ['blocked.example.test'], outbound: 'block' });
+    }
+    const result = renderSubscription(template('singbox', JSON.stringify(source)), [realityEndpoint(host)], { userAgent: 'sing-box/1.14.3' });
+    const dir = mkdtempSync(join(tmpdir(), 'mboard-singbox-core-test-')); dirs.push(dir);
+    const config = join(dir, 'synthetic.json'); writeFileSync(config, result.content);
+    const checked = spawnSync(singboxCore, ['check', '-c', config], { encoding: 'utf8', timeout: 15000 });
+    expect(checked.error).toBeUndefined(); expect(checked.status, checked.stderr + checked.stdout).toBe(0);
+    expect(checked.stderr).not.toMatch(/deprecated|legacy|FATAL/i);
+  }
+});
+
