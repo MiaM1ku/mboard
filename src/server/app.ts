@@ -173,11 +173,6 @@ export function createApp(options: AppOptions = {}) {
     if (n.tls) result.tls = { enabled: true, server_name: n.server_name || n.host };
     return result;
   }
-  function clientConfig(u: Row) {
-    const nodes = authorizedNodes(u);
-    const tags = nodes.map(n => `node-${n.id}`);
-    return { log: { level: 'warn' }, inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 }], outbounds: [{ type: 'selector', tag: 'proxy', outbounds: ['auto', ...tags, 'direct'], default: tags.length ? 'auto' : 'direct' }, { type: 'urltest', tag: 'auto', outbounds: tags.length ? tags : ['direct'], url: 'https://www.gstatic.com/generate_204', interval: '5m' }, ...nodes.map(n => outbound(n, u)), { type: 'direct', tag: 'direct' }], route: { final: 'proxy' } };
-  }
   function subscriptionEndpoints(u: Row): SubscriptionEndpoint[] {
     const healthyNodes=new Set(runtimeNodes().filter(n=>n.online).map(n=>n.id));
     return [...authorizedNodes(u).map(n => {
