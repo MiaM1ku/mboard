@@ -4,6 +4,7 @@ import { resolve, sep, extname } from 'node:path';
 import { isIP } from 'node:net';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, RuntimeCompileError } from './runtime';
+import { initializeTrafficReports, getReportSettings, saveReportSettings, buildPreview as buildTrafficReportPreview, enqueueReport, listReportRuns, recordReportTraffic, ReportError } from './traffic-reports';
 import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, selectSubscriptionFormat, TemplateValidationError, type SubscriptionEndpoint } from './subscriptions';
 
 // Parse an authority, not a URL: URL parsers silently repair several invalid Host values.
@@ -78,8 +79,8 @@ export function createApp(options: AppOptions = {}) {
   const accountLimit = options.loginLimit ?? 10, peerLimit = options.peerLoginLimit ?? 200;
   for (const value of [accountLimit,peerLimit]) if (!Number.isSafeInteger(value) || value < 1 || value > 1000000) throw new Error('Login limits must be integers from 1 to 1000000');
   const db = openDatabase(options.dbPath);
-  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`); }
   const now = options.now ?? (() => new Date());
+  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`);initializeTrafficReports(db,{now:now()}); }
   const stamp = () => now().toISOString();
   const get = (sql: string, ...args: any[]): Row | null => db.query(sql).get(...args) as Row | null;
   const all = (sql: string, ...args: any[]): Row[] => db.query(sql).all(...args) as Row[];
@@ -253,12 +254,15 @@ export function createApp(options: AppOptions = {}) {
           const b=await body(req);pick(b,['batch_id','records']);const batch=string(b.batch_id,'批次 ID',128);if(!Array.isArray(b.records)||b.records.length>10000)fail(400,'VALIDATION','请发送有效的流量记录');
           atomic(()=>{stillAuthenticated();if(get('SELECT 1 FROM runtime_traffic_batches WHERE machine_id=? AND batch_id=?',runtimeID,batch))return;
             const runtimeList=runtimeNodeViews(db);const sums=new Map<number,{up:number;down:number}>();
-            for(const r of b.records){if(!r||typeof r!=='object'||Array.isArray(r))fail(400,'VALIDATION','请检查流量记录');pick(r,['user_id','node_id','upload_bytes','download_bytes']);const uid=integer(r.user_id,'用户 ID',1),nid=integer(r.node_id,'节点 ID',1),up=integer(r.upload_bytes,'上传字节'),down=integer(r.download_bytes,'下载字节');
+            for(const r of b.records){if(!r||typeof r!=='object'||Array.isArray(r))fail(400,'VALIDATION','请检查流量记录');pick(r,['user_id','node_id','profile_id','upload_bytes','download_bytes']);const uid=integer(r.user_id,'用户 ID',1),nid=integer(r.node_id,'节点 ID',1),up=integer(r.upload_bytes,'上传字节'),down=integer(r.download_bytes,'下载字节');const pid=r.profile_id===undefined?'':string(r.profile_id,'出口身份',64);if(r.profile_id!==undefined&&(!/^[A-Za-z0-9-]{1,64}$/.test(pid)||pid==='0'))fail(400,'VALIDATION','请使用有效的出口身份');
               const runtimeNode=runtimeList.find(n=>n.id===nid&&n.machine_ids.includes(runtimeID));
-              if(!runtimeNode||!runtimeNode.group_ids.map(Number).some(g=>groupsFor('user',uid).includes(g)))fail(403,'TRAFFIC_GRANT','请核对机器和用户的节点访问范围');const u=requireRow('users',uid),s=sums.get(uid)||{up:0,down:0};s.up+=up;s.down+=down;
+              if(!runtimeNode||!runtimeNode.group_ids.map(Number).some(g=>groupsFor('user',uid).includes(g)))fail(403,'TRAFFIC_GRANT','请核对机器和用户的节点访问范围');
+               if(pid){const seen=new Set<number>();let root=runtimeNode;while(root.parent_id){if(seen.has(root.id))fail(403,'TRAFFIC_GRANT','请核对出口所属节点');seen.add(root.id);const parent=runtimeList.find(n=>n.id===root.parent_id);if(!parent)fail(403,'TRAFFIC_GRANT','请核对出口所属节点');root=parent}const allowed=all('SELECT payload FROM runtime_source_records WHERE kind=?','v2_server_route_profile').some(row=>{const p=JSON.parse(row.payload);return String(p.uuid)===pid&&Number(p.server_id||p.node_id)===root.id&&(!Array.isArray(p.entry_server_ids)||!p.entry_server_ids.length||p.entry_server_ids.map(Number).includes(nid))});if(!allowed)fail(403,'TRAFFIC_GRANT','请核对出口身份和节点归属')}
+               const u=requireRow('users',uid),s=sums.get(uid)||{up:0,down:0};s.up+=up;s.down+=down;
               if(![s.up,s.down,s.up+s.down,u.upload_bytes+s.up,u.download_bytes+s.down,u.upload_bytes+u.download_bytes+s.up+s.down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查字节计数的安全范围');sums.set(uid,s);
               const ledger=get('SELECT upload_bytes,download_bytes FROM runtime_node_traffic WHERE node_id=? AND user_id=? AND date=?',nid,uid,stamp().slice(0,10));if(ledger&&![ledger.upload_bytes+up,ledger.download_bytes+down,ledger.upload_bytes+ledger.download_bytes+up+down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查节点每日字节计数的安全范围');
-              run('INSERT INTO runtime_node_traffic(node_id,user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?,?) ON CONFLICT(node_id,user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',nid,uid,stamp().slice(0,10),up,down);
+              recordReportTraffic(db,{source:'runtime',user_id:uid,node_id:nid,profile_id:pid,upload_bytes:up,download_bytes:down,accepted_at:now()});
+               run('INSERT INTO runtime_node_traffic(node_id,user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?,?) ON CONFLICT(node_id,user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',nid,uid,stamp().slice(0,10),up,down);
             }
             let allUp=0,allDown=0;for(const row of all('SELECT upload_bytes,download_bytes FROM users')){allUp+=row.upload_bytes;allDown+=row.download_bytes;if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围')}for(const s of sums.values()){allUp+=s.up;allDown+=s.down}if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围');
             for(const[uid,s]of sums){const day=get('SELECT upload_bytes,download_bytes FROM traffic_daily WHERE user_id=? AND date=?',uid,stamp().slice(0,10));if(day&&![day.upload_bytes+s.up,day.download_bytes+s.down,day.upload_bytes+day.download_bytes+s.up+s.down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查账号每日字节累计的安全范围');run('UPDATE users SET upload_bytes=upload_bytes+?,download_bytes=download_bytes+? WHERE id=?',s.up,s.down,uid);run('INSERT INTO traffic_daily(user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?) ON CONFLICT(user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',uid,stamp().slice(0,10),s.up,s.down)}
@@ -291,6 +295,7 @@ export function createApp(options: AppOptions = {}) {
             const n = get('SELECT * FROM nodes WHERE id=? AND machine_id=?', nid, m.id), u = get('SELECT * FROM users WHERE id=?', uid);
             // Delayed accounting is accepted for existing grants even if the user just expired or hit quota.
             if (!n || !u || !granted(uid, nid)) fail(403, 'TRAFFIC_GRANT', '请确认流量记录属于本机器和授权用户');
+            recordReportTraffic(db,{source:'basic',user_id:uid,node_id:nid,upload_bytes:up,download_bytes:down,accepted_at:now()});
             const s = sums.get(uid) ?? { up: 0, down: 0 }; s.up += up; s.down += down;
             if (![s.up, s.down, s.up+s.down, u.upload_bytes+s.up, u.download_bytes+s.down, u.upload_bytes+u.download_bytes+s.up+s.down].every(Number.isSafeInteger)) fail(400, 'VALIDATION', '流量总数超出安全整数范围，请拆分并检查计数');
             sums.set(uid, s);
@@ -396,6 +401,20 @@ export function createApp(options: AppOptions = {}) {
     }
     if (path.startsWith('/api/v1/admin/')) {
       if (u.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '请使用管理员账号');
+      const ensureSession=()=>{const current=authenticated(req)!;if(current.id!==u.id||current.role!=='admin')fail(403,'ADMIN_REQUIRED','请使用当前管理员账号')};
+      if(path==='/api/v1/admin/traffic-reports/settings'&&method==='GET')return json(getReportSettings(db));
+      if(path==='/api/v1/admin/traffic-reports/runs'&&method==='GET')return json(listReportRuns(db));
+      if(path==='/api/v1/admin/traffic-reports/settings'&&method==='PATCH'){
+        const b=await body(req);pick(b,['enabled','webhook_url','authorization_header','top_limit']);
+        return json(atomic(()=>{ensureSession();const result=saveReportSettings(db,b);audit(u,'traffic-report.settings','settings');return result}));
+      }
+      if(['/api/v1/admin/traffic-reports/preview','/api/v1/admin/traffic-reports/send','/api/v1/admin/traffic-reports/test'].includes(path)&&method==='POST'){
+        const b=await body(req);pick(b,path.endsWith('/test')?['idempotency_key']:path.endsWith('/send')?['kind','idempotency_key']:['kind']);ensureSession();
+        const kind=path.endsWith('/test')?'test':string(b.kind,'报告周期',20);if(!['daily','weekly','monthly','test'].includes(kind))fail(400,'VALIDATION','请选择日报、周报或月报');
+        if(path.endsWith('/preview'))return json(buildTrafficReportPreview(db,kind as 'daily'|'weekly'|'monthly'|'test',now()));
+        const key=string(b.idempotency_key,'请求编号',128);if(!/^[A-Za-z0-9_-]{1,128}$/.test(key))fail(400,'VALIDATION','请使用有效的请求编号');
+        return json(atomic(()=>{ensureSession();const run=enqueueReport(db,kind as 'daily'|'weekly'|'monthly'|'test',now(),{manual:true,idempotencyKey:key});audit(u,'traffic-report.enqueue',kind);return run}),202);
+      }
       if (path === '/api/v1/admin/subscription/templates' && method==='GET') return json(listTemplates(db));
       const templateMatch=path.match(/^\/api\/v1\/admin\/subscription\/templates\/([a-z]+)(?:\/(validate|preview))?$/);
       if (templateMatch) {
@@ -531,6 +550,7 @@ export function createApp(options: AppOptions = {}) {
       response = await dispatch(req, typeof context === 'string' ? context : context?.requestIP?.(req)?.address);
     } catch (error) {
       if (error instanceof RuntimeCompileError) response=Response.json({error:{code:'RUNTIME_CONFIG',message:`请核对节点运行配置后重试（${error.code}）`}},{status:409});
+      else if (error instanceof ReportError) response=Response.json({error:{code:error.code,message:({INVALID_CONFIG:'请检查 HTTPS 地址、认证头和排行数量后重试。',DNS_FAILED:'请检查 Webhook 域名解析后重试。',PRIVATE_ADDRESS:'请填写可从公网访问的 HTTPS 接收地址。',TIMEOUT:'请检查接收服务连接后重试。',NETWORK_ERROR:'请检查接收服务连接后重试。',HTTP_ERROR:'请检查接收端认证和处理状态后重试。',RESPONSE_TOO_LARGE:'请将接收端响应控制在合理大小。'} as Record<string,string>)[error.code]}},{status:error.status});
       else if (error instanceof TemplateValidationError) response=Response.json({error:{code:'TEMPLATE_VALIDATION',message:error.message}},{status:400});
       else if (error instanceof ApiError) response = Response.json({error:{code:error.code,message:error.message}},{status:error.status});
       else if (String(error).includes('UNIQUE constraint failed')) response = Response.json({error:{code:'CONFLICT',message:'这条记录或端口已存在，请选择其他值'}},{status:409});

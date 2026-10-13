@@ -36,6 +36,7 @@ import {
 import { TrafficChart } from "./TrafficChart";
 import { AnimatedValue } from "./motion";
 import { SubscriptionTemplates } from "./SubscriptionTemplates";
+import { TrafficReports } from "./TrafficReports";
 
 const ROOT = "/api/v1/admin";
 const count = (value: number) => value.toLocaleString("zh-CN");
@@ -2141,6 +2142,7 @@ function SettingsPage() {
         </div>
       </Card>
       <SubscriptionTemplates onSaved={audit.reload} />
+      <TrafficReports onSaved={audit.reload} />
       <Card>
         <div className="card-header mb-custom-toolbar">
           <div>

@@ -519,6 +519,56 @@ test("移动导航和对话框键盘操作", async ({ page }) => {
   await invariant(page);
 });
 
+test("流量 Webhook 配置、预览、排队和凭据清除", async ({ page }) => {
+  await login(page);
+  const configRoot="admin/traffic-reports";
+  await post(page.request,`${configRoot}/settings`,{enabled:false,webhook_url:"https://receiver.example.test/private-hook?token=synthetic-secret",authorization_header:"Bearer synthetic-auth",top_limit:5},"PATCH");
+  await page.goto("/#/admin/settings");
+  await page.reload();
+  const section=page.locator(".card").filter({has:page.getByRole("heading",{name:"流量 Webhook",exact:true})});
+  await expect(section.getByText(/已配置：receiver.example.test/)).toBeVisible();
+  await expect(section.getByLabel("Webhook 地址",{exact:true})).toHaveValue("");
+  await expect(section.getByLabel("Authorization 请求头",{exact:true})).toHaveValue("");
+  expect(await section.innerText()).not.toContain("synthetic-secret");
+  expect(await section.innerText()).not.toContain("synthetic-auth");
+  await section.getByLabel("排行数量").fill("6");
+  await section.getByRole("button",{name:"保存 Webhook 设置",exact:true}).click();
+  await expect(section.getByRole("button",{name:"保存 Webhook 设置",exact:true})).toBeDisabled();
+  const secretRow=(await(await page.request.get(`/api/v1/${configRoot}/settings`)).json()).data;
+  expect(secretRow.authorization_configured).toBe(true);expect(secretRow.top_limit).toBe(6);
+  const previewCard=page.locator(".card").filter({has:page.getByRole("heading",{name:"报告预览",exact:true})});
+  await previewCard.getByRole("button",{name:"生成预览",exact:true}).click();
+  await expect(previewCard.getByLabel("报告预览",{exact:true})).toHaveValue(/每日流量报告/);
+  await expect(previewCard.getByLabel("报告预览",{exact:true})).toHaveAttribute("readonly","");
+  const fieldsBefore=await section.getByLabel("Webhook 地址",{exact:true}).inputValue();
+  expect(fieldsBefore).toBe("");
+  await section.getByRole("button",{name:"发送测试消息",exact:true}).click();
+  const modal=page.getByRole("dialog");
+  await expect(modal).toContainText("固定测试消息");
+  const pending=page.waitForResponse(r=>r.url().endsWith('/traffic-reports/send')&&r.request().method()==='POST');
+  await modal.getByRole("button",{name:"确认发送",exact:true}).click();
+  expect((await pending).status()).toBe(202);
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  const runCard=page.locator(".card").filter({has:page.getByRole("heading",{name:"发送记录",exact:true})});
+  await expect(runCard).toContainText("排队中");
+  const jobs=(await(await page.request.get(`/api/v1/${configRoot}/runs`)).json()).data;
+  expect(jobs[0].kind).toBe("test");expect(jobs[0].attempts).toBe(0);
+  // No worker is started in this test: mock only the GET run result to review status presentation.
+  await page.route("**/api/v1/admin/traffic-reports/runs",route=>route.fulfill({json:{data:[{...jobs[0],status:"sent",attempts:1,http_status:200}]}}));
+  await runCard.getByRole("button",{name:"刷新记录",exact:true}).click();
+  await expect(runCard).toContainText("已发送");
+  await section.getByLabel("清除 Authorization 请求头",{exact:true}).check();
+  await section.getByRole("button",{name:"保存 Webhook 设置",exact:true}).click();
+  await expect(section.getByText("按接收端要求填写完整的 Authorization 值。",{exact:true})).toBeVisible();
+  await invariant(page);
+  mkdirSync("docs/review/webhook",{recursive:true});
+  for(const[width,height]of[[1440,900],[390,844]]){
+    await page.setViewportSize({width,height});await invariant(page);
+    await section.scrollIntoViewIfNeeded();
+    await page.screenshot({path:`docs/review/webhook/settings-${width}.png`,fullPage:true,animations:"disabled"});
+  }
+});
+
 test("真实数字的动效、暂停和减少动态效果切换", async ({ page }) => {
   await login(page, reader);
   await page.emulateMedia({ reducedMotion: "no-preference" });

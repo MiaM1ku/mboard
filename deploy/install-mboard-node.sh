@@ -3,7 +3,7 @@
 # Release publisher replaces both SHA256 constants before publishing.
 set -eu
 umask 077
-AGENT_SHA256='81562d3681a4cbb60ac8409cda363c8df55d0c1ad8a98be9f9e05332fede2e1d'
+AGENT_SHA256='66a42d370414117ecf1f9c5dce92f7efb44d8a1cd5167546951f7d95246c0a83'
 CORE_SHA256='1e6b4ef716062484f52d3490c3b1c4d7798e8cd76aeaba3f01e9f3320c63bd90'
 
 say() { printf '%s\n' "$*"; }
@@ -342,7 +342,7 @@ main() {
     [ ! -f /usr/local/bin/xboard-node ] || old_bytes=$(stat -c %s /usr/local/bin/xboard-node)
     [ ! -d /etc/xboard-node ] || config_bytes=$(du -sk /etc/xboard-node | awk '{print $1 * 1024}')
     available_bytes=$(df -Pk /opt | awk 'NR==2 {printf "%.0f", $4 * 1024}')
-    required_bytes=$((2 * (12583074 + 41218210) + old_bytes + config_bytes + 67108864))
+    required_bytes=$((2 * (12595362 + 41218210) + old_bytes + config_bytes + 67108864))
     [ -n "$available_bytes" ] && [ "$available_bytes" -ge "$required_bytes" ] || fail 'Free disk space for two release copies, rollback binary, configuration and queue reserve, then retry.'
     download "$BASE/mboard-node-linux-amd64" "$STAGE/mboard-node" || fail 'Retry downloading the agent from the panel.'
     download "$BASE/sing-box-linux-amd64" "$STAGE/sing-box" || fail 'Retry downloading the core from the panel.'
