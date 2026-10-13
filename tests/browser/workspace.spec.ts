@@ -50,6 +50,7 @@ async function invariant(page: Page) {
   expect(text).not.toMatch(
     /不[^\s，。]{1,12}|没有|商业收入指标已从自用构建中移除/,
   );
+  expect(text).not.toContain("归档");
   const aligned = await page.evaluate(() =>
     Array.from(document.querySelectorAll("table")).every((table) => {
       const headers = Array.from(table.querySelectorAll("thead th"));
