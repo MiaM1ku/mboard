@@ -60,6 +60,8 @@ function fixture() {
   return { app, db, archive, sourceNode, raw, request, node, enroll, machine, snapshot, heartbeat, summary, addTLS, userCookie, adminCookie, foreignCookie };
 }
 
+test('legacy 32-hex credentials are accepted only by one-time enrollment',async()=>{const f=fixture(),old='e'.repeat(32);f.archive('v2_server_machine',10,{id:10,name:'Legacy 32-bit-format machine',token:old,is_active:1});const enrolled=await f.enroll(old);expect(enrolled.status).toBe(200);expect(enrolled.data.token).toMatch(/^[a-f0-9]{64}$/);expect((await f.node('config',undefined,old,undefined,'GET')).status).toBe(401);expect((await f.enroll(old)).data.token).toBe(enrolled.data.token)});
+
 function expectPrivateError(result: { text: string; body: any }, secrets: string[] = []) {
   expect(result.body.error).toBeDefined();
   for (const value of [oldToken, otherOldToken, privateKey, certificate, ...secrets]) expect(result.text).not.toContain(value);

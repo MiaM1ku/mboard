@@ -225,7 +225,8 @@ export function createApp(options: AppOptions = {}) {
     if (nodePath) {
       if (req.headers.get('cookie')?.includes('mboard_session=')) fail(401, 'NODE_AUTH', '请使用机器令牌连接');
       const bearer = req.headers.get('authorization');
-      if (!bearer || !/^Bearer [a-f0-9]{64}$/.test(bearer)) fail(401, 'NODE_AUTH', '请使用有效的机器令牌');
+      const tokenPattern=path==='/api/node/v1/enroll'?/^Bearer (?:[a-f0-9]{32}|[a-f0-9]{64})$/:/^Bearer [a-f0-9]{64}$/;
+      if (!bearer || !tokenPattern.test(bearer)) fail(401, 'NODE_AUTH', '请使用有效的机器令牌');
       if(path==='/api/node/v1/enroll'&&method==='POST'){
         const b=await body(req);pick(b,['machine_id']);const mid=integer(b.machine_id,'机器 ID',1);const supplied=bearer.slice(7);const current=authenticateRuntimeMachine(db,supplied);let token=supplied;
         if(current!==mid){
