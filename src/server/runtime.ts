@@ -254,24 +254,84 @@ function profileTag(db: Database, root: Row, p: Row) {
   if (p.outbound_template_id == null) return 'direct';
   const a=attachments(db,root).find(a=>Number(a.source_template_id)===Number(p.outbound_template_id)); if(!a) fail('profile-outbound-not-attached', `node ${root.id}, profile ${p.id}`); return scopedTag(root,a.tag);
 }
-function normalizeRoute(raw: Row, root: Row, tags: Set<string>): Row[] {
-  const r = clone(raw); if(r.outboundTag) {r.outbound=r.outboundTag;delete r.outboundTag;}
-  delete r.type;
+function compileRouteSets(db: Database, root: Row, ruleSets: Map<string,Row>) {
+  const definitions=source(db,'v2_rule_set');
+  const register=(tag: string, cfg: Row) => {
+    if(!tag || !/^[A-Za-z0-9_.:!@-]{1,128}$/.test(tag))fail('invalid-rule-set-tag',`node ${root.id}`);
+    const entry={...cfg,tag};const previous=ruleSets.get(tag);
+    if(previous && JSON.stringify(previous)!==JSON.stringify(entry))fail('conflicting-rule-set',`node ${root.id}`);
+    ruleSets.set(tag,entry);return tag;
+  };
+  const resolveSource=(definition: Row) => {
+    if(!yes(definition.enabled))fail('missing-rule-set',`node ${root.id}`);
+    const cfg=clone(obj(obj(definition.settings).singbox));cfg.type=String(cfg.type||'remote').toLowerCase();
+    if(!['remote','local'].includes(cfg.type) || !(cfg.type==='remote'?cfg.url:cfg.path) || !['binary','source'].includes(cfg.format))fail('incomplete-rule-set',`node ${root.id}`);
+    if(cfg.download_detour)cfg.download_detour=scopedTag(root,String(cfg.download_detour));
+    return register(String(definition.tag||''),cfg);
+  };
+  return {
+    resolve(value: any) {
+      const key=String(value);const definition=definitions.find(r=>String(r.uuid)===key || String(r.tag)===key);
+      return definition?resolveSource(definition):key;
+    },
+    geo(selector: string) {
+      const match=/^(geosite|geoip):(.+)$/i.exec(selector);if(!match)fail('unsupported-geo-selector',`node ${root.id}`);
+      const family=match[1]!.toLowerCase(),name=match[2]!.toLowerCase();
+      // Custom assets (ext:, filenames, query expressions) need an explicit source rule-set.
+      if(!/^[a-z0-9][a-z0-9_.!@-]*$/.test(name))fail('custom-geo-selector-needs-rule-set',`node ${root.id}`);
+      const tag=`${family}-${name}`;const definition=definitions.find(r=>String(r.tag)===tag);
+      return definition?resolveSource(definition):register(tag,{type:'remote',format:'binary',url:`https://raw.githubusercontent.com/SagerNet/sing-${family}/rule-set/${tag}.srs`});
+    }
+  };
+}
+type RouteSets = ReturnType<typeof compileRouteSets>;
+function routeHasDomain(rule: Row): boolean { return !!(rule.domain || rule.domain_suffix || rule.domain_regex || rule.domain_keyword || rule.rule_set || (rule.rules && arr(rule.rules).some(routeHasDomain))); }
+function normalizeRoute(raw: Row, root: Row, tags: Set<string>, sets: RouteSets): Row[] {
+  const r = clone(raw); if(r.outboundTag) {if(!r.outbound)r.outbound=r.outboundTag;delete r.outboundTag;}
   if(r.outbound === 'block' || r.action === 'reject') {r.action='reject';delete r.outbound;}
   else if(r.outbound) {r.outbound=scopedTag(root,String(r.outbound));r.action='route';if(!tags.has(r.outbound)) fail('route-target-missing',`node ${root.id}`);}
-  const supported = new Set(['inbound','auth_user','domain','domain_suffix','domain_keyword','domain_regex','ip_cidr','ip_is_private','source_ip_cidr','port','port_range','source_port','source_port_range','network','protocol','rule_set','action','outbound','invert','process_name','process_path','clash_mode','query_type']);
+  if(r.type==='logical') {
+    if(!['and','or'].includes(r.mode) || !arr(r.rules).length || Object.keys(r).some(k=>!['type','mode','rules','invert','action','outbound'].includes(k)))fail('unsupported-logical-route',`node ${root.id}`);
+    r.rules=arr(r.rules).flatMap(child=>normalizeRoute(obj(child),root,tags,sets));return [r];
+  }
+  if(r.type && !['default','field'].includes(r.type))fail('unsupported-route-type',`node ${root.id}`);delete r.type;
+  if(r.ip) {if(r.ip_cidr)fail('conflicting-route-ip-field',`node ${root.id}`);r.ip_cidr=r.ip;delete r.ip;}
+  const supported = new Set(['inbound','auth_user','domain','domain_suffix','domain_keyword','domain_regex','ip_cidr','ip_is_private','source_ip_cidr','source_ip_is_private','port','port_range','source_port','source_port_range','network','protocol','rule_set','rule_set_ip_cidr_match_source','action','outbound','invert','process_name','process_path','clash_mode','query_type','geosite','geoip','source_geoip']);
   if(Object.keys(r).some(k=>!supported.has(k))) fail('unsupported-route-field',`node ${root.id}`);
-  const domains=arr(r.domain); const exact:string[]=[], suffix:string[]=[],regex:string[]=[],keyword:string[]=[];
-  for(const d of domains) {if(String(d).startsWith('geosite:') || String(d).startsWith('geoip:')) fail('legacy-geo-selector-needs-rule-set',`node ${root.id}`);if(String(d).startsWith('domain:')) suffix.push(String(d).slice(7));else if(String(d).startsWith('full:')) exact.push(String(d).slice(5));else if(String(d).startsWith('regexp:')) regex.push(String(d).slice(7));else if(String(d).startsWith('keyword:')) keyword.push(String(d).slice(8));else exact.push(String(d));}
-  delete r.domain; const variants:Row[]=[];
-  for(const [key,values] of [['domain',exact],['domain_suffix',suffix],['domain_regex',regex],['domain_keyword',keyword]] as const) if(values.length) variants.push({...r,[key]:values});
-  return variants.length ? variants : [r];
+  if(r.rule_set)r.rule_set=arr(r.rule_set).map(sets.resolve);
+  const exact:string[]=[], suffix:string[]=arr(r.domain_suffix),regex:string[]=arr(r.domain_regex),keyword:string[]=arr(r.domain_keyword);
+  const destinationGeo:Row[]=[],sourceGeo:Row[]=[];
+  const geo=(value: string, source=false): Row => {
+    if(value.toLowerCase()==='geoip:private')return {[source?'source_ip_is_private':'ip_is_private']:true};
+    return {rule_set:[sets.geo(value)],...(source?{rule_set_ip_cidr_match_source:true}:{})};
+  };
+  for(const value of arr(r.domain)) {
+    const d=String(value);if(/^(geosite|geoip):/i.test(d))destinationGeo.push(geo(d));else if(d.startsWith('domain:'))suffix.push(d.slice(7));else if(d.startsWith('full:'))exact.push(d.slice(5));else if(d.startsWith('regexp:'))regex.push(d.slice(7));else if(d.startsWith('keyword:'))keyword.push(d.slice(8));else exact.push(d);
+  }
+  // Native domain suffixes can also contain panel geosite wrappers.
+  const ordinarySuffix=suffix.filter(d=>{if(/^geosite:/i.test(String(d))){destinationGeo.push(geo(String(d)));return false;}return true;});
+  for(const [key,values] of [['domain',exact],['domain_suffix',ordinarySuffix],['domain_regex',regex],['domain_keyword',keyword]] as const) {delete r[key];if(values.length)r[key]=values;}
+  for(const [key,source] of [['ip_cidr',false],['source_ip_cidr',true]] as const) {
+    if(!r[key])continue;const ordinary=arr(r[key]).filter(v=>{if(/^geoip:/i.test(String(v))){(source?sourceGeo:destinationGeo).push(geo(String(v),source));return false;}return true;});delete r[key];if(ordinary.length)r[key]=ordinary;
+  }
+  for(const [key,family,source] of [['geosite','geosite',false],['geoip','geoip',false],['source_geoip','geoip',true]] as const) {for(const name of arr(r[key]))(source?sourceGeo:destinationGeo).push(geo(`${family}:${name}`,source));delete r[key];}
+  if(!destinationGeo.length && !sourceGeo.length)return [r];
+  // Geo rule-sets belong to the same OR group as ordinary destination/source
+  // selectors. Keep auth, ports and invert outside that group, never a catch-all.
+  const action:Row={};for(const key of ['action','outbound','invert']) {if(key in r)action[key]=r[key];delete r[key];}
+  const groups:Row[]=[];
+  for(const [branches,keys] of [[destinationGeo,['domain','domain_suffix','domain_keyword','domain_regex','ip_cidr','ip_is_private']],[sourceGeo,['source_ip_cidr','source_ip_is_private']]] as [Row[],string[]][]) {
+    if(!branches.length)continue;const ordinary:Row={};for(const key of keys) {if(key in r)ordinary[key]=r[key];delete r[key];}
+    if(Object.keys(ordinary).length)branches.unshift(ordinary);
+    groups.push(branches.length===1?branches[0]!:{type:'logical',mode:'or',rules:branches});
+  }
+  if(Object.keys(r).length)groups.push(r);
+  return [{...(groups.length===1?groups[0]:{type:'logical',mode:'and',rules:groups}),...action}];
 }
 function compileRoutes(db: Database, root: Row, tags: Set<string>, ruleSets: Map<string,Row>): Row[] {
-  const rules:Row[]=[];
+  const rules:Row[]=[],sets=compileRouteSets(db,root,ruleSets);
   const templates=new Map(source(db,'v2_route_template').map(t=>[Number(t.id),t]));
   const outboundUUIDs=new Map(attachments(db,root).map(a=>[String(a.uuid),a.tag]));
-  const rs=new Map(source(db,'v2_rule_set').map(r=>[String(r.uuid),r]));
   for(const a of source(db,'v2_server_route_template').filter(a=>Number(a.server_id)===Number(root.id) && yes(a.enabled))) {
     const t=templates.get(Number(a.route_template_id)); if(!t) fail('missing-route-template',`node ${root.id}`);if(!yes(t.enabled))continue;
     for(const rule of arr(t.rules)) {
@@ -279,23 +339,27 @@ function compileRoutes(db: Database, root: Row, tags: Set<string>, ruleSets: Map
       const match=obj(rule.match); const action=obj(rule.action); const native:Row={};
       const aliases:Row={domains:'domain',domain_suffixes:'domain_suffix',domain_keywords:'domain_keyword',domain_regexes:'domain_regex',ip_cidrs:'ip_cidr',source_ip_cidrs:'source_ip_cidr',source_cidrs:'source_ip_cidr',source_ports:'source_port',ports:'port',port_ranges:'port_range',networks:'network',protocols:'protocol',rule_sets:'rule_set'};
       for(const [k,v] of Object.entries(match)) {if(!aliases[k] && !['domain','domain_suffix','domain_keyword','domain_regex','ip_cidr','port','network','protocol'].includes(k))fail('unsupported-route-match',`node ${root.id}`);native[aliases[k]||k]=v;}
-      if(native.rule_set) native.rule_set=arr(native.rule_set).map(uuid=>{const r=rs.get(String(uuid));if(!r||!yes(r.enabled))fail('missing-rule-set',`node ${root.id}`);const cfg=obj(obj(r.settings).singbox);if(!cfg.type || !(cfg.url || cfg.path))fail('incomplete-rule-set',`node ${root.id}`);ruleSets.set(String(r.tag),{...cfg,tag:r.tag});return r.tag;});
+      if(native.rule_set) native.rule_set=arr(native.rule_set).map(uuid=>{const tag=sets.resolve(uuid);if(!ruleSets.has(tag))fail('missing-rule-set',`node ${root.id}`);return tag;});
       if(!Object.keys(native).length)fail('empty-route-match',`node ${root.id}`);
       // Each populated old selector is an independent OR branch, including port ranges.
       for(const [selector,values] of Object.entries(native)) {
         const branch:Row={[selector]:values};
         if(selector==='port'||selector==='source_port') {const numeric:number[]=[],ranges:string[]=[];for(const value of arr(values)){const v=String(value);if(/^\d+[:-]\d+$/.test(v)){const [lo,hi]=v.split(/[:-]/).map(x=>port(x,`node ${root.id}`));if(lo!>hi!)fail('invalid-route-port-range',`node ${root.id}`);ranges.push(`${lo}:${hi}`);}else numeric.push(port(value,`node ${root.id}`));}delete branch[selector];if(numeric.length)branch[selector]=numeric;if(ranges.length)branch[selector==='port'?'port_range':'source_port_range']=ranges;}
         if(action.type==='block' || action.type==='reject')branch.action='reject';else if(action.type==='direct')branch.outbound='direct';else if(action.type==='route')branch.outbound=outboundUUIDs.get(String(action.target))||action.target;else fail('unsupported-route-action',`node ${root.id}`);
-        rules.push(...normalizeRoute(branch,root,tags));
+        rules.push(...normalizeRoute(branch,root,tags,sets));
       }
     }
   }
-  for(const raw of arr(root.custom_routes)) rules.push(...normalizeRoute(raw,root,tags));
+  for(const raw of arr(root.custom_routes)) rules.push(...normalizeRoute(raw,root,tags,sets));
   rules.push({action:'reject',ip_cidr:['10.0.0.0/8','100.64.0.0/10','127.0.0.0/8','169.254.0.0/16','172.16.0.0/12','192.0.0.0/24','192.168.0.0/16','198.18.0.0/15','fc00::/7','fe80::/10','::1/128']});
   const legacyRoutes=new Map(source(db,'v2_server_route').map(r=>[Number(r.id),r]));
-  for(const rid of arr(root.route_ids)) {const r=legacyRoutes.get(Number(rid));if(!r)fail('missing-legacy-route',`node ${root.id}`);const matches=arr(r.match);if(!matches.length)fail('empty-legacy-route',`node ${root.id}`);const destination=r.action==='direct'?'direct':r.action==='proxy'?r.action_value:'block';const domains=matches.filter(x=>!String(x).includes('/')).map(x=>String(x).replace(/^\*\./,''));const cidrs=matches.filter(x=>String(x).includes('/'));if(domains.length)rules.push(...normalizeRoute({domain_suffix:domains,outbound:destination},root,tags));if(cidrs.length)rules.push(...normalizeRoute({ip_cidr:cidrs,outbound:destination},root,tags));}
-  if(rules.some(r=>r.domain||r.domain_suffix||r.domain_regex||r.domain_keyword||r.rule_set))rules.unshift({action:'sniff'});
-  return rules.map(r=>({...r,inbound:[`mb:n:${root.id}`]}));
+  for(const rid of arr(root.route_ids)) {const r=legacyRoutes.get(Number(rid));if(!r)fail('missing-legacy-route',`node ${root.id}`);const matches=arr(r.match);if(!matches.length)fail('empty-legacy-route',`node ${root.id}`);const destination=r.action==='direct'?'direct':r.action==='proxy'?r.action_value:'block';const domains=matches.filter(x=>!String(x).includes('/')).map(x=>String(x).replace(/^\*\./,''));const cidrs=matches.filter(x=>String(x).includes('/'));if(domains.length)rules.push(...normalizeRoute({domain_suffix:domains,outbound:destination},root,tags,sets));if(cidrs.length)rules.push(...normalizeRoute({ip_cidr:cidrs,outbound:destination},root,tags,sets));}
+  if(rules.some(routeHasDomain))rules.unshift({action:'sniff'});
+  return rules.map(r=>{
+    if(r.type!=='logical' && !r.invert)return {...r,inbound:[`mb:n:${root.id}`]};
+    const match=clone(r),action:Row={};for(const key of ['action','outbound']) {if(key in match)action[key]=match[key];delete match[key];}
+    return {type:'logical',mode:'and',rules:[{inbound:[`mb:n:${root.id}`]},match],...action};
+  });
 }
 
 export function compileMachine(db: Database, machineID: number): CompiledMachine {
@@ -339,9 +403,15 @@ export function compileMachine(db: Database, machineID: number): CompiledMachine
     if(native.route) {const route=obj(native.route);config.route.rules=[...arr(route.rules),...config.route.rules,...arr(route.rules_after)];if(route.rule_set)config.route.rule_set=[...(config.route.rule_set||[]),...arr(route.rule_set)];if(route.final)config.route.final=route.final;for(const k of Object.keys(route))if(!['rules','rules_after','rule_set','final'].includes(k))config.route[k]=route[k];}
     if(native.dns)config.dns=native.dns;if(native.experimental)config.experimental={...config.experimental,...native.experimental};
   }
-  for(const rule of config.route.rules)if(rule.auth_user)rule.auth_user=[...new Set(arr(rule.auth_user).flatMap(alias=>authAliases.get(String(alias))||[String(alias)]))];
+  const definedRuleSets=new Set(arr(config.route.rule_set).map(set=>String(set.tag)));
+  const visitRule=(rule: Row) => {
+    if(rule.rule_set && arr(rule.rule_set).some(tag=>!definedRuleSets.has(String(tag))))fail('missing-rule-set',`machine ${machineID}`);
+    if(rule.auth_user)rule.auth_user=[...new Set(arr(rule.auth_user).flatMap(alias=>authAliases.get(String(alias))||[String(alias)]))];
+    if(rule.outbound && !tags.has(rule.outbound) && !endpoints.some(e=>e.tag===rule.outbound))fail('unresolved-route-target',`machine ${machineID}`);
+    if(rule.rules)for(const child of arr(rule.rules))visitRule(child);
+  };
+  for(const rule of config.route.rules)visitRule(rule);
   config.experimental={...config.experimental,v2ray_api:{listen:'127.0.0.1:19090',stats:{enabled:true,users:traffic_labels.map(t=>t.label)}}};
-  for(const r of config.route.rules)if(r.outbound && !tags.has(r.outbound) && !endpoints.some(e=>e.tag===r.outbound))fail('unresolved-route-target',`machine ${machineID}`);
   const digest=sha(JSON.stringify({config,traffic_labels,files}));
   const revision=db.transaction(()=>{const key=`machine:${machineID}:config`;const old=db.query('SELECT value FROM runtime_metadata WHERE key=?').get(key) as Row | null;const prior=old?obj(old.value):{digest:'',revision:0};const revision=prior.digest===digest?Number(prior.revision):Number(prior.revision)+1;if(!Number.isSafeInteger(revision))fail('revision-overflow',`machine ${machineID}`);db.query('INSERT INTO runtime_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,JSON.stringify({digest,revision}));return revision;}).immediate();
   return {revision,config,traffic_labels,files,warnings:[...new Set(warnings)]};

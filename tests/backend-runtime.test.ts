@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test';
 import { openDatabase } from '../src/server/database';
 import { restoreRuntime, compileMachine, authorizedEndpoints, activateMachine, provisionMachineToken, authenticateRuntimeMachine, heartbeatRuntimeMachine, deriveUUID, shadowsocksServerPSK, RuntimeCompileError } from '../src/server/runtime';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 
 const oldUUID='12345678-1234-4123-8123-123456789abc';
 const future='2099-01-01T00:00:00.000Z';
@@ -102,6 +103,59 @@ describe('independent runtime restoration',()=>{
   });
   test('legacy root auth route aliases translate to runtime labels',()=>{
     const {db}=fixture('shadowsocks',{custom_routes:[{auth_user:[oldUUID],outbound:'direct'}]});restoreRuntime(db);const c=compileMachine(db,2);expect(c.config.route.rules.find((r:any)=>r.auth_user).auth_user).toEqual(['mb:u:1:n:10:p:0']);db.close();
+  });
+  test('canonical geosite custom route keeps its scoped SOCKS target and enables cached rule-sets',()=>{
+    const {db}=fixture('shadowsocks',{custom_outbounds:[{tag:'warp',protocol:'socks',settings:{address:'127.0.0.1',port:40000}}],custom_routes:[{domain:['geosite:google'],outboundTag:'warp'}]});restoreRuntime(db);
+    const c=compileMachine(db,2);expect(c.config.outbounds[1]).toEqual({type:'socks',tag:'n10:warp',server:'127.0.0.1',server_port:40000,version:'5'});
+    expect(c.config.route.rules[0]).toEqual({action:'sniff',inbound:['mb:n:10']});
+    expect(c.config.route.rules[1]).toEqual({rule_set:['geosite-google'],action:'route',outbound:'n10:warp',inbound:['mb:n:10']});
+    expect(c.config.route.rule_set).toEqual([{type:'remote',format:'binary',tag:'geosite-google',url:'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-google.srs'}]);
+    expect(c.config.experimental.cache_file.enabled).toBe(true);expect(compileMachine(db,2).revision).toBe(c.revision);db.close();
+  });
+  test('missing custom target still fails sanitized instead of dropping the geosite route',()=>{
+    const {db}=fixture('shadowsocks',{custom_routes:[{domain:['geosite:google'],auth_user:['SYNTHETIC-AUTH-NOT-TO-LOG'],outboundTag:'warp'}]});restoreRuntime(db);
+    try {compileMachine(db,2);throw Error('expected fail');} catch(e) {expect(String(e)).toContain('route-target-missing: node 10');expect(String(e)).not.toContain('SYNTHETIC-AUTH-NOT-TO-LOG');}
+    db.close();
+  });
+  test('mixed geo and ordinary selectors stay OR inside auth, ports and inversion',()=>{
+    const {db}=fixture('shadowsocks',{custom_routes:[{domain:['geosite:google','full:example.test','domain:other.test'],ip_cidr:['198.51.100.0/24'],auth_user:[oldUUID],port:[443],invert:true,outbound:'direct'}]});restoreRuntime(db);
+    const c=compileMachine(db,2),rule=c.config.route.rules[1];expect(rule).toMatchObject({type:'logical',mode:'and',action:'route',outbound:'direct'});expect(rule.inbound).toBeUndefined();
+    expect(rule.rules[0]).toEqual({inbound:['mb:n:10']});expect(rule.rules[1]).toEqual({type:'logical',mode:'and',invert:true,rules:[{type:'logical',mode:'or',rules:[{domain:['example.test'],domain_suffix:['other.test'],ip_cidr:['198.51.100.0/24']},{rule_set:['geosite-google']}]},{auth_user:['mb:u:1:n:10:p:0'],port:[443]}]});db.close();
+  });
+  test('plain mixed domain aliases remain one inverted native match',()=>{
+    const {db}=fixture('shadowsocks',{custom_routes:[{domain:['full:exact.test','domain:suffix.test','regexp:^regex\\.test$','keyword:word'],domain_suffix:['native.test'],invert:true,outbound:'block'}]});restoreRuntime(db);
+    expect(compileMachine(db,2).config.route.rules[1]).toEqual({type:'logical',mode:'and',action:'reject',rules:[{inbound:['mb:n:10']},{domain:['exact.test'],domain_suffix:['native.test','suffix.test'],domain_regex:['^regex\\.test$'],domain_keyword:['word'],invert:true}]});db.close();
+  });
+  test('native logical OR recurses through geo, auth aliases and scoped endpoint targets',()=>{
+    const {db}=fixture('shadowsocks',{custom_outbounds:[{protocol:'wireguard',tag:'warp',settings:{private_key:'synthetic-private',local_address:['172.16.0.2/32'],peers:[{address:'192.0.2.1',port:2408,public_key:'synthetic-public'}]}}],custom_routes:[{type:'logical',mode:'or',rules:[{domain:['geosite:google']},{type:'logical',mode:'and',rules:[{auth_user:[oldUUID]},{ip_cidr:['geoip:cn']}]}],outbound:'warp'}]});restoreRuntime(db);
+    const c=compileMachine(db,2),rule=c.config.route.rules[1];expect(rule.outbound).toBe('n10:warp');expect(c.config.endpoints[0].tag).toBe('n10:warp');
+    expect(rule.rules[1]).toEqual({type:'logical',mode:'or',rules:[{rule_set:['geosite-google']},{type:'logical',mode:'and',rules:[{auth_user:['mb:u:1:n:10:p:0']},{rule_set:['geoip-cn']}]}]});
+    expect(c.config.route.rule_set.map((r:any)=>r.tag)).toEqual(['geosite-google','geoip-cn']);db.close();
+  });
+  test('geo source wrappers use source CIDR mode and private ranges do not fetch assets',()=>{
+    const {db}=fixture('shadowsocks',{custom_routes:[{source_ip_cidr:['geoip:cn','geoip:private','192.0.2.0/24'],outbound:'direct'},{geoip:['private'],outbound:'block'}]});restoreRuntime(db);
+    const c=compileMachine(db,2);expect(c.config.route.rules[1].rules[1]).toEqual({type:'logical',mode:'or',rules:[{source_ip_cidr:['192.0.2.0/24']},{rule_set:['geoip-cn'],rule_set_ip_cidr_match_source:true},{source_ip_is_private:true}]});
+    expect(c.config.route.rules[2]).toEqual({ip_is_private:true,action:'reject',inbound:['mb:n:10']});expect(c.config.route.rule_set).toHaveLength(1);db.close();
+  });
+  test('source UUID uses explicit custom rule-set settings instead of inferred geosite URLs',()=>{
+    const {db,archive}=fixture();archive('v2_rule_set',9,{id:9,uuid:'custom-source-9',tag:'adsaibands',enabled:1,settings:{singbox:{format:'source',url:'https://rules.example.test/custom.json',update_interval:'24h'}}});
+    archive('v2_route_template',3,{id:3,enabled:1,rules:[{match:{rule_sets:['custom-source-9'],domains:['geosite:category-ai-!cn']},action:{type:'direct'}}]});archive('v2_server_route_template',1,{id:1,server_id:10,route_template_id:3,enabled:1});restoreRuntime(db);
+    const c=compileMachine(db,2);expect(c.config.route.rule_set).toContainEqual({type:'remote',format:'source',tag:'adsaibands',url:'https://rules.example.test/custom.json',update_interval:'24h'});
+    expect(c.config.route.rule_set).toContainEqual({type:'remote',format:'binary',tag:'geosite-category-ai-!cn',url:'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ai-!cn.srs'});
+    expect(c.config.route.rules.some((r:any)=>r.rule_set?.includes('adsaibands'))).toBe(true);db.close();
+  });
+  test('custom external geosite selectors require explicit rule-sets',()=>{
+    const {db}=fixture('shadowsocks',{custom_routes:[{domain:['geosite:ext:private.dat:custom'],outbound:'direct'}]});restoreRuntime(db);expect(()=>compileMachine(db,2)).toThrow('custom-geo-selector-needs-rule-set');db.close();
+  });
+  test.skipIf(!process.env.MBOARD_TEST_SING_BOX)('pinned core accepts synthesized geosite SOCKS and scoped logical routes',()=>{
+    for(const custom_routes of [
+      [{domain:['geosite:google'],outboundTag:'warp'}],
+      [{type:'logical',mode:'or',rules:[{domain:['geosite:google','domain:example.test'],port:[443],invert:true},{source_ip_cidr:['geoip:cn'],auth_user:[oldUUID]}],outbound:'warp'}]
+    ]) {
+      const {db}=fixture('shadowsocks',{custom_outbounds:[{tag:'warp',protocol:'socks',settings:{address:'127.0.0.1',port:40000}}],custom_routes});restoreRuntime(db);
+      const result=spawnSync(process.env.MBOARD_TEST_SING_BOX!,['check','-c','/dev/stdin'],{input:JSON.stringify(compileMachine(db,2).config),encoding:'utf8'});
+      expect(result.stderr).toBe('');expect(result.status).toBe(0);db.close();
+    }
   });
   test('explicit PSK wins over ambiguous date timestamp',()=>{expect(shadowsocksServerPSK({id:1,created_at:'2024-01-01',server_psk:Buffer.from('1234567890123456').toString('base64')},'2022-blake3-aes-128-gcm')).toBe(Buffer.from('1234567890123456').toString('base64'));expect(()=>shadowsocksServerPSK({id:1,created_at:'2024-01-01'},'2022-blake3-aes-128-gcm')).toThrow('ambiguous-server-psk');});
 });
