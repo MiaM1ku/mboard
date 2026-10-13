@@ -2,6 +2,8 @@ import { openDatabase, hash, secret } from './database';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, extname } from 'node:path';
 import { isIP } from 'node:net';
+import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, RuntimeCompileError } from './runtime';
+import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, selectSubscriptionFormat, TemplateValidationError, type SubscriptionEndpoint } from './subscriptions';
 
 // Parse an authority, not a URL: URL parsers silently repair several invalid Host values.
 function hostName(authority: string): string | undefined {
@@ -75,6 +77,7 @@ export function createApp(options: AppOptions = {}) {
   const accountLimit = options.loginLimit ?? 10, peerLimit = options.peerLoginLimit ?? 200;
   for (const value of [accountLimit,peerLimit]) if (!Number.isSafeInteger(value) || value < 1 || value > 1000000) throw new Error('Login limits must be integers from 1 to 1000000');
   const db = openDatabase(options.dbPath);
+  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`); }
   const now = options.now ?? (() => new Date());
   const stamp = () => now().toISOString();
   const get = (sql: string, ...args: any[]): Row | null => db.query(sql).get(...args) as Row | null;
@@ -105,6 +108,9 @@ export function createApp(options: AppOptions = {}) {
     for (const id of ids) if (!get('SELECT id FROM groups WHERE id=?', id)) fail(400, 'VALIDATION', '请选择已有的分组');
     return ids;
   };
+  const runtimeMachines=()=>runtimeMachineViews(db).map(m=>{let revision=0;try{revision=compileMachine(db,m.id).revision}catch{}return {...m,config_revision:revision,online:m.active&&m.core_ready&&m.telemetry_ready&&revision>0&&m.applied_revision===revision&&Boolean(m.last_seen_at)&&now().getTime()-Date.parse(m.last_seen_at!)<90000}});
+  const runtimeNodes=()=>{const machines=runtimeMachines();return runtimeNodeViews(db).map(n=>{const ready=n.machine_ids.some(mid=>machines.some(m=>m.id===mid&&m.online));return {...n,active:ready,machine_id:n.machine_ids[0]||null,group_ids:n.group_ids.map(Number),tls:n.protocol!=='shadowsocks',server_name:'',created_at:'',online:ready&&n.enabled}})};
+  const userNodes=(u:Row)=>[...authorizedNodes(u).map(nodeView),...runtimeNodes().filter(n=>n.active&&n.enabled&&n.show&&active(u)&&n.group_ids.some(g=>groupsFor('user',u.id).includes(g)))];
   const sessionCookie = (req: Request, token: string, age: number) => `mboard_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${new URL(publicOrigin ?? req.url).protocol === 'https:' ? '; Secure' : ''}`;
   const sessionSeconds = options.sessionSeconds ?? 604800;
   const newSession = (req: Request, uid: number) => {
@@ -171,6 +177,30 @@ export function createApp(options: AppOptions = {}) {
     const tags = nodes.map(n => `node-${n.id}`);
     return { log: { level: 'warn' }, inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 }], outbounds: [{ type: 'selector', tag: 'proxy', outbounds: ['auto', ...tags, 'direct'], default: tags.length ? 'auto' : 'direct' }, { type: 'urltest', tag: 'auto', outbounds: tags.length ? tags : ['direct'], url: 'https://www.gstatic.com/generate_204', interval: '5m' }, ...nodes.map(n => outbound(n, u)), { type: 'direct', tag: 'direct' }], route: { final: 'proxy' } };
   }
+  function subscriptionEndpoints(u: Row): SubscriptionEndpoint[] {
+    const healthyNodes=new Set(runtimeNodes().filter(n=>n.online).map(n=>n.id));
+    return [...authorizedNodes(u).map(n => {
+      const native=outbound(n,u);const {type,tag,server,server_port,uuid,password,...settings}=native;
+      return {id:n.id,name:`node-${n.id}`,protocol:n.protocol,host:n.host,port:n.port,credential:u.credential,settings};
+    }),...runtimeEndpoints(db,u.id).filter(e=>healthyNodes.has(Number(String(e.id).split(':')[0])))];
+  }
+  function renderedSubscription(u: Row, req: Request) {
+    const name=selectSubscriptionFormat(req.headers.get('user-agent'),new URL(req.url).searchParams);
+    const template=getTemplate(db,name);
+    if (!template) fail(503,'TEMPLATE_READY','请刷新模板配置后更新订阅');
+    const site=settings();const link=subscriptionURL(u.subscription_token)||`${new URL(req.url).origin}/s/${u.subscription_token}`;
+    const clean=(s:unknown)=>String(s).replace(/[\r\n\x00-\x1f]/g,' ').replaceAll(',','，');
+    const info=`title=${clean(site.site_name)}订阅信息, content=上传流量：${u.upload_bytes} B\\n下载流量：${u.download_bytes} B\\n流量额度：${u.quota_bytes?`${u.quota_bytes} B`:'按实际用量累计'}\\n到期时间：${u.expires_at||'长期有效'}`;
+    return renderSubscription(template,subscriptionEndpoints(u),{userAgent:req.headers.get('user-agent')||undefined,metadata:{app_name:clean(site.site_name),subs_link:link,subs_domain:new URL(link).host,subscribe_info:info}});
+  }
+  function previewEndpoints(): SubscriptionEndpoint[] {
+    return [
+      {id:1,name:'🇭🇰 示例香港 Reality',protocol:'vless',host:'hk.example.test',port:443,credential:'12345678-1234-4234-8234-123456789abc',settings:{flow:'xtls-rprx-vision',tls:{enabled:true,server_name:'example.test',reality:{enabled:true,public_key:'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',short_id:'01'}}}},
+      {id:2,name:'🇺🇸 示例美国 SS2022',protocol:'shadowsocks',host:'us.example.test',port:20180,credential:`${Buffer.alloc(16,1).toString('base64')}:${Buffer.alloc(16,2).toString('base64')}`,settings:{method:'2022-blake3-aes-128-gcm'}},
+      {id:3,name:'🇯🇵 示例日本 Trojan',protocol:'trojan',host:'jp.example.test',port:443,credential:'mboard-preview-credential',settings:{tls:{enabled:true,server_name:'jp.example.test'}}},
+      {id:4,name:'🇸🇬 示例新加坡 AnyTLS',protocol:'anytls',host:'sg.example.test',port:443,credential:'mboard-preview-credential',settings:{tls:{enabled:true,server_name:'sg.example.test'}}},
+    ];
+  }
   function serverConfig(m: Row) {
     const nodes = all('SELECT * FROM nodes WHERE machine_id=? AND enabled=1 ORDER BY id', m.id);
     const users = all('SELECT * FROM users WHERE enabled=1 ORDER BY id').filter(active);
@@ -195,6 +225,32 @@ export function createApp(options: AppOptions = {}) {
       if (req.headers.get('cookie')?.includes('mboard_session=')) fail(401, 'NODE_AUTH', '请使用机器令牌连接');
       const bearer = req.headers.get('authorization');
       if (!bearer || !/^Bearer [a-f0-9]{64}$/.test(bearer)) fail(401, 'NODE_AUTH', '请使用有效的机器令牌');
+      const runtimeID=authenticateRuntimeMachine(db,bearer.slice(7));
+      if(runtimeID!==null){
+        const stillAuthenticated=()=>{if(authenticateRuntimeMachine(db,bearer.slice(7))!==runtimeID)fail(401,'NODE_AUTH','机器凭据更新后请重新接入')};
+        if(path==='/api/node/v1/config'&&method==='GET'){const c=compileMachine(db,runtimeID);return json({revision:c.revision,config:c.config,traffic_labels:c.traffic_labels})}
+        if(path==='/api/node/v1/heartbeat'&&method==='POST'){
+          const b=await body(req);pick(b,['version','uptime_seconds','config_revision','core_ready','telemetry_ready']);stillAuthenticated();string(b.version,'节点版本',100);integer(b.uptime_seconds,'运行秒数');integer(b.config_revision,'配置版本');for(const k of ['core_ready','telemetry_ready'])if(b[k]!==undefined)boolean(b[k],k);
+          const state=heartbeatRuntimeMachine(db,runtimeID,b);return json({server_time:stamp(),config_revision:state.revision});
+        }
+        if(path==='/api/node/v1/traffic'&&method==='POST'){
+          const b=await body(req);pick(b,['batch_id','records']);const batch=string(b.batch_id,'批次 ID',128);if(!Array.isArray(b.records)||b.records.length>10000)fail(400,'VALIDATION','请发送有效的流量记录');
+          atomic(()=>{stillAuthenticated();if(get('SELECT 1 FROM runtime_traffic_batches WHERE machine_id=? AND batch_id=?',runtimeID,batch))return;
+            const runtimeList=runtimeNodeViews(db);const sums=new Map<number,{up:number;down:number}>();
+            for(const r of b.records){if(!r||typeof r!=='object'||Array.isArray(r))fail(400,'VALIDATION','请检查流量记录');pick(r,['user_id','node_id','upload_bytes','download_bytes']);const uid=integer(r.user_id,'用户 ID',1),nid=integer(r.node_id,'节点 ID',1),up=integer(r.upload_bytes,'上传字节'),down=integer(r.download_bytes,'下载字节');
+              const runtimeNode=runtimeList.find(n=>n.id===nid&&n.machine_ids.includes(runtimeID));
+              if(!runtimeNode||!runtimeNode.group_ids.map(Number).some(g=>groupsFor('user',uid).includes(g)))fail(403,'TRAFFIC_GRANT','请核对机器和用户的节点访问范围');const u=requireRow('users',uid),s=sums.get(uid)||{up:0,down:0};s.up+=up;s.down+=down;
+              if(![s.up,s.down,s.up+s.down,u.upload_bytes+s.up,u.download_bytes+s.down,u.upload_bytes+u.download_bytes+s.up+s.down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查字节计数的安全范围');sums.set(uid,s);
+              const ledger=get('SELECT upload_bytes,download_bytes FROM runtime_node_traffic WHERE node_id=? AND user_id=? AND date=?',nid,uid,stamp().slice(0,10));if(ledger&&![ledger.upload_bytes+up,ledger.download_bytes+down,ledger.upload_bytes+ledger.download_bytes+up+down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查节点每日字节计数的安全范围');
+              run('INSERT INTO runtime_node_traffic(node_id,user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?,?) ON CONFLICT(node_id,user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',nid,uid,stamp().slice(0,10),up,down);
+            }
+            let allUp=0,allDown=0;for(const row of all('SELECT upload_bytes,download_bytes FROM users')){allUp+=row.upload_bytes;allDown+=row.download_bytes;if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围')}for(const s of sums.values()){allUp+=s.up;allDown+=s.down}if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围');
+            for(const[uid,s]of sums){const day=get('SELECT upload_bytes,download_bytes FROM traffic_daily WHERE user_id=? AND date=?',uid,stamp().slice(0,10));if(day&&![day.upload_bytes+s.up,day.download_bytes+s.down,day.upload_bytes+day.download_bytes+s.up+s.down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查账号每日字节累计的安全范围');run('UPDATE users SET upload_bytes=upload_bytes+?,download_bytes=download_bytes+? WHERE id=?',s.up,s.down,uid);run('INSERT INTO traffic_daily(user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?) ON CONFLICT(user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',uid,stamp().slice(0,10),s.up,s.down)}
+            run('INSERT INTO runtime_traffic_batches(machine_id,batch_id,created_at) VALUES(?,?,?)',runtimeID,batch,stamp());
+          });return json({accepted:true});
+        }
+        fail(404,'NOT_FOUND','请使用机器心跳、配置或流量接口');
+      }
       const m = get('SELECT * FROM machines WHERE token_hash=? AND enabled=1', hash(bearer.slice(7)));
       if (!m) fail(401, 'NODE_AUTH', '请确认机器令牌和启用状态');
       if (path === '/api/node/v1/config' && method === 'GET') return json({ revision: m.config_revision, config: serverConfig(m) });
@@ -273,11 +329,13 @@ export function createApp(options: AppOptions = {}) {
       const token = path.slice(3); const u = /^[a-f0-9]{64}$/.test(token) ? get('SELECT * FROM users WHERE subscription_token=?', token) : null;
       if (!u) fail(404, 'NOT_FOUND', '请确认订阅链接');
       if (!active(u)) fail(403, 'SUBSCRIPTION_UNAVAILABLE', '订阅待恢复，请确认账号状态、到期时间和流量额度');
-      const config = JSON.stringify(clientConfig(u));
+      const rendered = renderedSubscription(u,req);
+      const config = rendered.content;
+      const suffix=rendered.content_type.includes('json')?'json':rendered.content_type.includes('yaml')?'yaml':'conf';
       return new Response(method === 'HEAD' ? null : config, { headers: {
-        'Content-Type': 'application/json;charset=utf-8',
+        'Content-Type': rendered.content_type,
         'Content-Length': String(new TextEncoder().encode(config).byteLength),
-        'Content-Disposition': 'attachment; filename="mboard.json"',
+        'Content-Disposition': `attachment; filename="mboard.${suffix}"`,
       } });
     }
     if (!path.startsWith('/api/')) return staticResponse(req, options.distDir);
@@ -297,9 +355,9 @@ export function createApp(options: AppOptions = {}) {
     if (path === '/api/v1/me/subscription/rotate' && method === 'POST') {
       const token = secret(); atomic(() => { run('UPDATE users SET subscription_token=?,credential=? WHERE id=?', token, crypto.randomUUID(), u.id); bump(); audit(u, 'subscription.rotate', u.id); }); return json({ subscription_token: token, ...(subscriptionURL(token) ? { subscription_url: subscriptionURL(token) } : {}) });
     }
-    if (path === '/api/v1/nodes' && method === 'GET') return json(authorizedNodes(u).map(nodeView));
+    if (path === '/api/v1/nodes' && method === 'GET') return json(userNodes(u));
     if (path === '/api/v1/traffic' && method === 'GET') { const raw = url.searchParams.get('days') ?? '30'; if (!/^\d+$/.test(raw)) fail(400, 'VALIDATION', '请填写 1 到 366 天的范围'); return json(traffic(u.id, integer(Number(raw), '天数', 1, 366))); }
-    if (path === '/api/v1/overview' && method === 'GET') return json({ user: userView(u), nodes: authorizedNodes(u).map(nodeView), traffic: traffic(u.id), notices: all('SELECT * FROM notices ORDER BY id DESC') });
+    if (path === '/api/v1/overview' && method === 'GET') return json({ user: userView(u), nodes: userNodes(u), traffic: traffic(u.id), notices: all('SELECT * FROM notices ORDER BY id DESC') });
     if (['/api/v1/notices','/api/v1/guides'].includes(path) && method === 'GET') return json(all(`SELECT * FROM ${path.endsWith('notices') ? 'notices' : 'guides'} ORDER BY id DESC`));
     if (path === '/api/v1/tickets' && method === 'GET') return json(all('SELECT * FROM tickets WHERE user_id=? ORDER BY id DESC', u.id).map(ticketView));
     if (path === '/api/v1/tickets' && method === 'POST') {
@@ -320,6 +378,22 @@ export function createApp(options: AppOptions = {}) {
     }
     if (path.startsWith('/api/v1/admin/')) {
       if (u.role !== 'admin') fail(403, 'ADMIN_REQUIRED', '请使用管理员账号');
+      if (path === '/api/v1/admin/subscription/templates' && method==='GET') return json(listTemplates(db));
+      const templateMatch=path.match(/^\/api\/v1\/admin\/subscription\/templates\/([a-z]+)(?:\/(validate|preview))?$/);
+      if (templateMatch) {
+        const name=templateMatch[1]!,operation=templateMatch[2];
+        const template=getTemplate(db,name);
+        if(!template) fail(404,'TEMPLATE_READY','请刷新模板列表后重试');
+        if(method==='GET'&&!operation) return json(template);
+        if(method==='POST'&&operation){
+          const b=await body(req);pick(b,['content']);const content=typeof b.content==='string'?b.content:fail(400,'VALIDATION','请填写模板内容');
+          if(operation==='validate')return json(validateTemplate(name,content));
+          const check=validateTemplate(name,content);if(!check.valid)fail(400,'TEMPLATE_VALIDATION',check.errors[0]?.message||'请校正模板格式后预览');
+          return json(renderSubscription({name:template.name,content},previewEndpoints(),{metadata:{app_name:'mboard 示例',subs_link:'https://subscription.example.test/s/example',subs_domain:'subscription.example.test',subscribe_info:'title=mboard 示例订阅信息, content=示例节点预览'}}));
+        }
+        if((method==='PUT'||method==='PATCH')&&!operation){const b=await body(req);pick(b,['content']);if(typeof b.content!=='string')fail(400,'VALIDATION','请填写模板内容');const saved=saveTemplate(db,name,b.content);audit(u,'subscription.template.update',name);return json(saved)}
+        fail(404,'NOT_FOUND','请使用模板读取、校验、预览或保存操作');
+      }
       if (path === '/api/v1/admin/imports' && method === 'GET') {
         // Explicit display allowlist: never return payloads, protocol_settings,
         // encrypted settings, password hashes, keys, or old/new credentials.
@@ -345,10 +419,10 @@ export function createApp(options: AppOptions = {}) {
         return json({ summary: { users: count('v2_user'), nodes: nodes.length, machines: machines.length, groups: count('v2_server_group'), imported_at: imported?.created_at ?? null }, nodes, machines });
       }
       if (path === '/api/v1/admin/overview' && method === 'GET') {
-        const machines = all('SELECT * FROM machines ORDER BY last_seen_at DESC,id DESC');
-        const nodes = all('SELECT * FROM nodes');
+        const machines = [...all('SELECT * FROM machines ORDER BY last_seen_at DESC,id DESC').map(machineView),...runtimeMachines()];
+        const nodes = [...all('SELECT * FROM nodes').map(nodeView),...runtimeNodes()];
         const totals = get('SELECT COUNT(*) users,COALESCE(SUM(enabled),0) enabled_users,COALESCE(SUM(upload_bytes),0) upload_bytes,COALESCE(SUM(download_bytes),0) download_bytes FROM users')!;
-        return json({ ...totals, nodes: nodes.length, online_nodes: nodes.map(nodeView).filter(n => n.online).length, machines: machines.length, online_machines: machines.filter(online).length, traffic: traffic(null), recent_machines: machines.slice(0, 10).map(machineView) });
+        return json({ ...totals, nodes: nodes.length, online_nodes: nodes.filter(n => n.online).length, machines: machines.length, online_machines: machines.filter(m=>m.online).length, traffic: traffic(null), recent_machines: machines.sort((a,b)=>String(b.last_seen_at||'').localeCompare(String(a.last_seen_at||''))).slice(0, 10) });
       }
       if (path === '/api/v1/admin/audit' && method === 'GET') return json(all('SELECT * FROM audit ORDER BY id DESC LIMIT 100'));
       if (path === '/api/v1/admin/tickets' && method === 'GET') return json(all('SELECT * FROM tickets ORDER BY id DESC').map(ticketView));
@@ -360,7 +434,7 @@ export function createApp(options: AppOptions = {}) {
       if (match) {
         const table = match[1], id = match[2] ? integer(Number(match[2]), '记录 ID', 1) : null;
         const view = (row: Row) => table === 'users' ? userView(row, true) : table === 'nodes' ? nodeView(row) : table === 'machines' ? machineView(row) : row;
-        if (!id && method === 'GET') return json(all(`SELECT * FROM ${table} ORDER BY id`).map(view));
+        if (!id && method === 'GET') {const existing=all(`SELECT * FROM ${table} ORDER BY id`).map(view);return json(table==='nodes'?[...existing,...runtimeNodes()]:table==='machines'?[...existing,...runtimeMachines()]:existing)}
         if (id && table === 'machines' && match[3] && method === 'POST') {
           requireRow(table, id); const token = secret(); atomic(() => { run('UPDATE machines SET token_hash=?,last_seen_at=NULL,config_revision=config_revision+1 WHERE id=?', hash(token), id); audit(u, 'machine.token.rotate', id); }); return json({ token });
         }
@@ -436,7 +510,9 @@ export function createApp(options: AppOptions = {}) {
       }
       response = await dispatch(req, typeof context === 'string' ? context : context?.requestIP?.(req)?.address);
     } catch (error) {
-      if (error instanceof ApiError) response = Response.json({error:{code:error.code,message:error.message}},{status:error.status});
+      if (error instanceof RuntimeCompileError) response=Response.json({error:{code:'RUNTIME_CONFIG',message:`请核对节点运行配置后重试（${error.code}）`}},{status:409});
+      else if (error instanceof TemplateValidationError) response=Response.json({error:{code:'TEMPLATE_VALIDATION',message:error.message}},{status:400});
+      else if (error instanceof ApiError) response = Response.json({error:{code:error.code,message:error.message}},{status:error.status});
       else if (String(error).includes('UNIQUE constraint failed')) response = Response.json({error:{code:'CONFLICT',message:'这条记录或端口已存在，请选择其他值'}},{status:409});
       else if (String(error).includes('FOREIGN KEY constraint failed')) response = Response.json({error:{code:'IN_USE',message:'这条记录还有关联内容，请先处理关联'}},{status:409});
       else { console.error('mboard request failure:', error instanceof Error ? error.name : 'UnknownError'); response = Response.json({error:{code:'INTERNAL',message:'操作待完成，请稍后重试'}},{status:500}); }

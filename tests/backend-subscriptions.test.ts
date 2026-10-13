@@ -1,0 +1,373 @@
+import { afterEach, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { parse } from 'yaml';
+import {
+  getTemplate, initializeSubscriptionTemplates, listTemplates, MAX_TEMPLATE_BYTES,
+  renderSubscription, saveTemplate, selectSubscriptionFormat, TEMPLATE_NAMES, TemplateValidationError,
+  validateTemplate, type SubscriptionEndpoint, type TemplateName,
+} from '../src/server/subscriptions';
+
+const databases: Database[] = [], dirs: string[] = [];
+afterEach(() => { for (const db of databases.splice(0)) db.close(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+function database(path = ':memory:') { const db = new Database(path, { create: true, strict: true }); databases.push(db); return db; }
+function legacy(db: Database, contents: Record<TemplateName, string>) {
+  db.exec('CREATE TABLE IF NOT EXISTS legacy_records (kind TEXT,id TEXT,payload TEXT,created_at TEXT,PRIMARY KEY(kind,id))');
+  TEMPLATE_NAMES.forEach((name, index) => db.query('INSERT INTO legacy_records VALUES (?,?,?,?)').run('v2_subscribe_templates', String(index + 1), JSON.stringify({ id: index + 1, name, content: contents[name], created_at: '2020-01-01', updated_at: '2021-02-03' }), '2022-03-04'));
+}
+const endpoint = (patch: Partial<SubscriptionEndpoint> = {}): SubscriptionEndpoint => ({ id: 1, name: '香港 HK', protocol: 'trojan', host: 'authorized.example.test', port: 443, credential: 'synthetic-password', settings: { tls: { enabled: true, server_name: 'sni.example.test' } }, ...patch });
+function template(name: TemplateName, content?: string) { const db = database(); initializeSubscriptionTemplates(db); return { name, content: content ?? getTemplate(db, name)!.content }; }
+const customIni = '# 用户自己的注释\r\n[General]\r\ndns-server = 1.1.1.1\r\n[Proxy]\r\n本地 = direct\r\n[Proxy Group]\r\n香港 = select, 本地, policy-regex-filter=HK|香港, url=http://test.example/\r\n总选择 = select, 香港, DIRECT\r\n[Rule]\r\nDOMAIN-SUFFIX,custom.example,香港\r\nFINAL,总选择\r\n';
+const legacyRules = Array.from({ length: 510 }, (_, i) => `DOMAIN-SUFFIX,rule-${i}.example.test,Proxy`);
+const legacyIni = '#!MANAGED-CONFIG $subs_link interval=86400 strict=false\r\n# OriginalRestore\r\n[General]\r\ndns-server=1.1.1.1\r\nalways-real-ip=$subs_domain\r\n[Proxy]\r\n  $proxies  \r\n[Proxy Group]\r\nProxy=select,auto,fallback,$proxy_group\r\nauto=url-test,$proxy_group,url=https://probe.example.test/204,interval=300\r\nfallback=fallback,$proxy_group,url=https://probe.example.test/204,interval=300\r\n[Panel]\r\nuserinfo=$subscribe_info\r\n[Rule]\r\n' + legacyRules.join('\r\n') + '\r\nFINAL,Proxy\r\n';
+const legacyYaml = '# OriginalRestore\n dns: {enable: true, nameserver: [https://dns.example.test/query]}\n'.replace('\n dns:', '\ndns:')
+  + 'proxies: $proxies # authorized nodes\nproxy-groups:\n'
+  + '  - {name: "$app_name", type: select, proxies: [auto, fallback, DIRECT, "$proxy_group"]}\n'
+  + '  - {name: auto, type: url-test, proxies: $proxy_group, url: https://probe.example.test/204, interval: 300}\n'
+  + '  - {name: fallback, type: fallback, proxies: [$proxy_group], url: https://probe.example.test/204, interval: 300}\n'
+  + 'rules:\n' + legacyRules.map(rule => '  - ' + rule.replace(/,Proxy$/, ',$app_name')).join('\n') + '\n  - MATCH,$app_name\n';
+const synthetic = {
+  singbox: '{\n "dns":{"servers":[{"type":"https","tag":"自定义","server":"dns.example"}]}, "outbounds":[{"type":"selector","tag":"选择","outbounds":["direct"]},{"type":"direct","tag":"direct"}], "route":{"rules":[{"domain_suffix":["custom.example"],"outbound":"direct"}],"final":"选择"}}\n',
+  clash: '# custom clash\nproxies: []\nproxy-groups: [{name: 选择, type: select, proxies: [DIRECT]}]\nrules: ["DOMAIN-SUFFIX,custom.example,DIRECT"]\n',
+  clashmeta: '# custom meta\nproxies: []\nproxy-groups: [{name: 选择, type: select, proxies: [DIRECT]}]\nrules: ["DOMAIN-SUFFIX,custom.example,DIRECT"]\n',
+  stash: '# custom stash\nproxies: []\nproxy-groups: [{name: 选择, type: select, proxies: [DIRECT]}]\nrules: ["DOMAIN-SUFFIX,custom.example,DIRECT"]\n',
+  surge: customIni,
+  surfboard: customIni,
+} satisfies Record<TemplateName, string>;
+
+test('six archived original records seed before defaults, including names, IDs, timestamps and exact bytes', () => {
+  const db = database(); legacy(db, synthetic); initializeSubscriptionTemplates(db);
+  expect(listTemplates(db)).toHaveLength(6);
+  TEMPLATE_NAMES.forEach((name, index) => expect(getTemplate(db, name)).toEqual({ id: index + 1, name, content: synthetic[name], created_at: '2020-01-01', updated_at: '2021-02-03', source: 'archive' }));
+  initializeSubscriptionTemplates(db);
+  TEMPLATE_NAMES.forEach(name => expect(getTemplate(db, name)!.content).toBe(synthetic[name]));
+});
+test('restart, saved edits and render never rewrite archived template content', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mboard-subscriptions-test-')); dirs.push(dir); const path = join(dir, 'test.sqlite');
+  const db = database(path); legacy(db, synthetic); initializeSubscriptionTemplates(db);
+  const saved = synthetic.surge.replace('custom.example', 'edited.example');
+  saveTemplate(db, 'surge', saved);
+  db.close(); databases.splice(databases.indexOf(db), 1);
+  const reopened = database(path); initializeSubscriptionTemplates(reopened);
+  expect(getTemplate(reopened, 'surge')!.content).toBe(saved);
+  expect(getTemplate(reopened, 'surge')!.source).toBe('custom');
+  TEMPLATE_NAMES.filter(n => n !== 'surge').forEach(name => {
+    renderSubscription(getTemplate(reopened, name)!, [endpoint()]);
+    expect(getTemplate(reopened, name)!.content).toBe(synthetic[name]);
+  });
+});
+test('archive imported after first startup replaces only builtin defaults, never saved content', () => {
+  const db = database(); initializeSubscriptionTemplates(db); saveTemplate(db, 'clash', synthetic.clash);
+  legacy(db, synthetic); initializeSubscriptionTemplates(db);
+  expect(getTemplate(db, 'clash')!.source).toBe('custom');
+  expect(getTemplate(db, 'surge')!.content).toBe(synthetic.surge);
+  expect(getTemplate(db, 'surge')!.id).toBe(5);
+});
+test('invalid archive payload rolls back instead of silently replacing the user content with defaults', () => {
+  const db = database(); db.exec("CREATE TABLE legacy_records(kind TEXT,id TEXT,payload TEXT); INSERT INTO legacy_records VALUES ('v2_subscribe_templates','1','bad secret payload');");
+  expect(() => initializeSubscriptionTemplates(db)).toThrow('归档模板数据无法读取');
+  expect(db.query("SELECT name FROM sqlite_master WHERE name='subscription_templates'").get()).toBeNull();
+});
+test('save validates first, keeps exact original whitespace, and has no partial update on failure', () => {
+  const db = database(); initializeSubscriptionTemplates(db); const original = getTemplate(db, 'singbox')!;
+  expect(() => saveTemplate(db, 'singbox', '{"secret":"do-not-echo"')).toThrow(TemplateValidationError);
+  expect(getTemplate(db, 'singbox')).toEqual(original);
+  const saved = '\n' + synthetic.singbox + '\n'; expect(saveTemplate(db, 'singbox', saved).content).toBe(saved);
+  expect(() => saveTemplate(db, 'Unknown', saved)).toThrow('请选择支持');
+});
+test('content limit uses UTF-8 bytes, with a 512 KiB ceiling', () => {
+  const content = synthetic.singbox.replace('"dns":', '"padding":"' + '中'.repeat(Math.ceil(MAX_TEMPLATE_BYTES / 3)) + '","dns":');
+  expect(validateTemplate('singbox', content).errors[0]!.message).toContain('512 KiB');
+  expect(validateTemplate('singbox', '').valid).toBe(false);
+});
+test('explicit format/target, recognized UA priority, aliases and default singbox', () => {
+  expect(selectSubscriptionFormat('Clash', { target: 'Surge' })).toBe('surge');
+  expect(selectSubscriptionFormat('Surge', new URLSearchParams('target=clash&format=sing-box'))).toBe('singbox');
+  for (const [ua, name] of [['sing-box/1.12.0', 'singbox'], ['Hiddify', 'singbox'], ['SFM', 'singbox'], ['Clash', 'clash'], ['ClashX Meta', 'clashmeta'], ['ClashMetaForAndroid', 'clashmeta'], ['mihomo/1.19.1', 'clashmeta'], ['Clash Verge', 'clashmeta'], ['Stash/3.3.0', 'stash'], ['Surge iOS', 'surge'], ['Surfboard', 'surfboard']] as const) expect(selectSubscriptionFormat(ua)).toBe(name);
+  expect(selectSubscriptionFormat('unknown-client')).toBe('singbox');
+  expect(() => selectSubscriptionFormat('', { format: 'exe' })).toThrow('支持的订阅格式');
+});
+test('invalid JSON, YAML and INI errors are generic Chinese issues without raw credentials', () => {
+  for (const [name, content] of [
+    ['singbox', '{"password":"secret-value"'], ['singbox', '[]'], ['singbox', '{"outbounds":{}}'],
+    ['clash', 'proxies: [secret-value\n'], ['clash', 'proxies: []\nproxies: [secret-value]\nproxy-groups: []'],
+    ['clash', 'proxies: !evil secret-value\nproxy-groups: []'], ['clash', '---\nproxies: []\nproxy-groups: []\n---\nsecret-value'],
+    ['surge', '[Proxy\nsecret-value'], ['surge', '[Proxy]\ninvalid-secret-value\n[Proxy Group]\n[Rule]'],
+    ['surge', '[Proxy]\np = trojan, "secret-value\n[Proxy Group]\n[Rule]'],
+  ] as [TemplateName, string][]) {
+    const result = validateTemplate(name, content); expect(result.valid).toBe(false);
+    expect(JSON.stringify(result)).not.toContain('secret-value'); expect(result.errors[0]!.message).toMatch(/[\u4e00-\u9fff]/);
+  }
+  const position = validateTemplate('clash', 'proxies: [\nproxy-groups: []').errors[0]!;
+  expect(position.line).toBeGreaterThan(0); expect(position.column).toBeGreaterThan(0);
+});
+test('safe YAML anchors work within bounds, excessive aliases are rejected', () => {
+  expect(validateTemplate('clash', 'dns: &dns {enable: true}\nx-dns: *dns\nproxies: []\nproxy-groups: []').valid).toBe(true);
+  const recursive = 'x: &a [*a]\nproxies: []\nproxy-groups: []';
+  expect(validateTemplate('clash', recursive).valid).toBe(false);
+});
+test('JSON keeps advanced DNS/route/experimental settings and only caller supplied authorized endpoints', () => {
+  const source = JSON.parse(synthetic.singbox); source.experimental = { cache_file: { enabled: true }, custom: { nested: [1, 2] } };
+  const settings = { flow: 'xtls-rprx-vision', tls: { enabled: true, server_name: 'reality.example', utls: { enabled: true, fingerprint: 'chrome' }, reality: { enabled: true, public_key: 'synthetic-key', short_id: 'abcd' } }, transport: { type: 'ws', path: '/preserved', headers: { Host: 'test.example' } }, domain_resolver: '自定义' };
+  const e = endpoint({ protocol: 'vless', credential: 'synthetic-uuid', settings });
+  const rendered = renderSubscription(template('singbox', JSON.stringify(source)), [e]); const root = JSON.parse(rendered.content);
+  expect(root.dns).toEqual(source.dns); expect(root.route).toEqual(source.route); expect(root.experimental).toEqual(source.experimental);
+  expect(root.outbounds.at(-1)).toMatchObject({ ...settings, uuid: e.credential, server: e.host, server_port: e.port, type: 'vless' });
+  expect(root.outbounds[0].outbounds).toEqual(['direct', e.name]);
+  expect(rendered.node_count).toBe(1); expect(rendered.content).not.toContain('unauthorized.example');
+  expect(renderSubscription(template('singbox', JSON.stringify(source)), []).content).not.toContain(e.credential);
+});
+test('settings cannot override endpoint identity or credentials', () => {
+  const rendered = renderSubscription(template('singbox'), [endpoint({ settings: { server: 'unauthorized.example', server_port: 9, uuid: 'other-user', password: 'other-user', type: 'unknown', tag: 'other', tls: { enabled: true } } })]);
+  expect(rendered.content).not.toContain('other-user'); expect(rendered.content).not.toContain('unauthorized.example');
+  expect(JSON.parse(rendered.content).outbounds.at(-1).password).toBe('synthetic-password');
+});
+test('Sing-box include/exclude/fallback groups use old priority and nested group names', () => {
+  const content = JSON.stringify({ outbounds: [
+    { type: 'selector', tag: 'HK', outbounds: [], include: 'HK|香港', exclude: 'slow' },
+    { type: 'urltest', tag: 'JP', outbounds: [], include: 'Japan', fallback: ['JP|日本', 'direct'] },
+    { type: 'selector', tag: 'nested', outbounds: ['HK'], include: 'no-match', fallback: 'JP' },
+    { type: 'direct', tag: 'direct' },
+  ] });
+  const rendered = JSON.parse(renderSubscription(template('singbox', content), [endpoint(), endpoint({ id: 2, name: '日本 JP' }), endpoint({ id: 3, name: 'HK slow' })]).content);
+  expect(rendered.outbounds[0].outbounds).toEqual(['香港 HK']); expect(rendered.outbounds[1].outbounds).toEqual(['日本 JP']); expect(rendered.outbounds[2].outbounds).toEqual(['HK', 'JP']);
+  expect(rendered.outbounds[0].include).toBeUndefined(); expect(rendered.outbounds[0].exclude).toBeUndefined();
+});
+test('bad/unsafe group regex skips matches with safe warnings, rather than throwing or leaking its source', () => {
+  const content = JSON.stringify({ outbounds: [{ type: 'selector', tag: 'x', outbounds: ['direct'], include: '(secret-value)+', fallback: 'direct' }, { type: 'direct', tag: 'direct' }] });
+  const result = renderSubscription(template('singbox', content), [endpoint()]); expect(result.warnings.length).toBeGreaterThan(0); expect(result.warnings.join('')).not.toContain('secret-value');
+});
+test('three YAML formats preserve custom DNS/rules/providers/nested groups and comments', () => {
+  const source = '# 用户规则注释\ndns: {enable: true, nameserver: [https://dns.example/dns-query]}\nproxy-providers: {custom: {type: http, url: https://provider.example/proxies}}\nrule-providers: {mine: {type: http, behavior: domain, url: https://rules.example/list}}\nproxies: [{name: 本地, type: direct}]\nproxy-groups:\n  - {name: 香港, type: select, proxies: ["/HK|香港/i", 本地]}\n  - {name: 总选择, type: select, proxies: [香港, DIRECT]}\n  - {name: 外部, type: select, proxies: [], use: [custom]}\nrules: ["DOMAIN-SUFFIX,custom.example,香港", "MATCH,总选择"]\n';
+  for (const name of ['clash', 'clashmeta', 'stash'] as const) {
+    const result = renderSubscription(template(name, source), [endpoint(), endpoint({ id: 2, name: '日本 JP' })]); const root = parse(result.content), old = parse(source);
+    for (const key of ['dns', 'rules', 'proxy-providers', 'rule-providers']) expect(root[key]).toEqual(old[key]);
+    expect(result.content).toContain('# 用户规则注释'); expect(root.proxies).toHaveLength(3);
+    expect(root['proxy-groups'][0].proxies).toEqual(['香港 HK', '本地']);
+    expect(root['proxy-groups'][1].proxies).toEqual(['香港', 'DIRECT', '香港 HK', '日本 JP']);
+    expect(root['proxy-groups'][2].use).toEqual(['custom']);
+  }
+});
+test('VLESS Reality, SS2022 and AnyTLS supported conversions and legacy Clash skips', () => {
+  const endpoints = [endpoint({ protocol: 'vless', name: 'Reality', settings: { flow: 'xtls-rprx-vision', tls: { enabled: true, server_name: 'r.test', reality: { enabled: true, public_key: 'key', short_id: '12ab' }, utls: { enabled: true, fingerprint: 'chrome' } } } }), endpoint({ protocol: 'shadowsocks', name: 'SS2022', settings: { method: '2022-blake3-aes-128-gcm' }, credential: 'server-key:user-key' }), endpoint({ protocol: 'anytls', name: 'AnyTLS' })];
+  const result = renderSubscription(template('clashmeta'), endpoints); const root = parse(result.content);
+  expect(root.proxies[0]).toMatchObject({ type: 'vless', flow: 'xtls-rprx-vision', 'reality-opts': { 'public-key': 'key', 'short-id': '12ab' } });
+  expect(root.proxies[1]).toMatchObject({ type: 'ss', cipher: '2022-blake3-aes-128-gcm', password: 'server-key:user-key' });
+  expect(root.proxies[2].type).toBe('anytls'); expect(result.node_count).toBe(3);
+  const clash = renderSubscription(template('clash'), endpoints); expect(clash.node_count).toBe(0); expect(clash.warnings.length).toBeGreaterThan(0); expect(parse(clash.content).proxies).toEqual([]);
+});
+test('client-version capability gates AnyTLS, Reality and SS2022', () => {
+  const anytls = endpoint({ protocol: 'anytls' });
+  expect(renderSubscription(template('singbox'), [anytls], { userAgent: 'sing-box/1.11.0' }).node_count).toBe(0);
+  expect(renderSubscription(template('singbox'), [anytls], { clientVersion: '1.12.0' }).node_count).toBe(1);
+  expect(renderSubscription(template('stash'), [anytls], { userAgent: 'Stash/3.2.0' }).node_count).toBe(0);
+  expect(renderSubscription(template('stash'), [anytls], { userAgent: 'Stash/3.3.0' }).node_count).toBe(1);
+  const ss = endpoint({ protocol: 'shadowsocks', settings: { method: '2022-blake3-aes-128-gcm' } });
+  expect(renderSubscription(template('stash'), [ss], { clientVersion: '2.9.0' }).node_count).toBe(0);
+});
+test('unsupported endpoint features/protocols skipped rather than invalid unknown config emitted', () => {
+  const input = [endpoint({ protocol: 'invented-secret' }), endpoint({ settings: { transport: { type: 'xhttp' } } }), endpoint({ settings: { tls: { enabled: true, ech: { enabled: true } } } }), endpoint({ name: 'inject\n[Rule]' })];
+  const result = renderSubscription(template('clashmeta'), input); expect(result.node_count).toBe(0); expect(parse(result.content).proxies).toEqual([]); expect(result.warnings.join('')).not.toContain('invented-secret');
+});
+test('INI appends proxies with no placeholders, fills filtered/nested groups, preserves Rule/General bytes', () => {
+  for (const name of ['surge', 'surfboard'] as const) {
+    const result = renderSubscription(template(name, customIni), [endpoint(), endpoint({ id: 2, name: '日本 JP' })]);
+    expect(result.content).toContain('香港 HK = trojan, authorized.example.test, 443, password=synthetic-password');
+    expect(result.content).toContain('香港 = select, 本地, 香港 HK, policy-regex-filter=HK|香港, url=http://test.example/');
+    expect(result.content).toContain('总选择 = select, 香港, DIRECT, 香港 HK, 日本 JP');
+    expect(result.content.slice(result.content.indexOf('[Rule]'))).toBe(customIni.slice(customIni.indexOf('[Rule]')));
+    expect(result.content.split('[Proxy]')[0]).toBe(customIni.split('[Proxy]')[0]!);
+    expect(result.node_count).toBe(2); expect(result.content_type).toContain('text/plain');
+  }
+});
+test('INI credentials and policy names escape commas, equals, quotes and backslashes without rule injection', () => {
+  const e = endpoint({ name: '名字,="\\ test', credential: 'pass,="\\#', host: 'host.example' });
+  const result = renderSubscription(template('surge'), [e]);
+  expect(result.content).toContain('"名字,=\\"\\\\ test" = trojan');
+  expect(result.content).toContain('password="pass,=\\"\\\\#"');
+  expect(result.content).toContain('节点选择 = select, DIRECT, "名字,=\\"\\\\ test"');
+  expect(validateTemplate('surge', result.content).valid).toBe(true);
+});
+test('INI SS2022 and AnyTLS syntax differs for Surge and Surfboard; VLESS skipped', () => {
+  const endpoints = [endpoint({ protocol: 'anytls', name: 'AnyTLS' }), endpoint({ protocol: 'shadowsocks', name: 'SS2022', settings: { method: '2022-blake3-aes-256-gcm' } }), endpoint({ protocol: 'vless', name: 'VLESS' })];
+  const surge = renderSubscription(template('surge'), endpoints); expect(surge.content).toContain('AnyTLS = anytls, authorized.example.test, 443, password=synthetic-password');
+  const surfboard = renderSubscription(template('surfboard'), endpoints); expect(surfboard.content).toContain('AnyTLS = anytls, authorized.example.test, 443, synthetic-password');
+  expect(surge.node_count).toBe(2); expect(surge.content).not.toContain('VLESS =');
+});
+test('old INI injection tokens work without requiring tokens in newly imported content', () => {
+  const content = '[Proxy]\n$proxies\n[Proxy Group]\n选择 = select, $proxy_group\n[Rule]\nFINAL,选择\n';
+  const result = renderSubscription(template('surge', content), [endpoint()]); expect(result.content).not.toContain('$proxies'); expect(result.content).toContain('选择 = select, 香港 HK');
+});
+test('duplicate endpoint names avoid collisions with static proxies and groups', () => {
+  const input = [endpoint({ name: '节点选择' }), endpoint({ name: '节点选择', id: 2 })];
+  const result = renderSubscription(template('singbox'), input); const root = JSON.parse(result.content);
+  expect(root.outbounds.map((o: any) => o.tag)).toEqual(['节点选择', 'direct', '节点选择 (2)', '节点选择 (3)']);
+});
+test('optional native compiled chains retain advanced fields but pin public endpoint identity', () => {
+  const e = endpoint({ protocol: 'shadowsocks', settings: { method: 'aes-128-gcm' }, native_outbounds: [{ type: 'shadowtls', tag: 'outer', server: 'outer.example', server_port: 443, version: 3, password: 'synthetic-outer' }, { type: 'shadowsocks', tag: 'inner', server: 'wrong.example', server_port: 1, method: 'aes-128-gcm', password: 'other-user', detour: 'outer' }] });
+  const root = JSON.parse(renderSubscription(template('singbox'), [e]).content);
+  expect(root.outbounds.at(-1)).toMatchObject({ tag: e.name, detour: `${e.name} · 1`, server: e.host, server_port: e.port, password: e.credential });
+  expect(root.outbounds.at(-2).version).toBe(3); expect(root.outbounds[0].outbounds).toContain(e.name);
+});
+test('YAML dynamic anchors, alias-valued group collections and anchored filters keep resolving', () => {
+  for (const source of [
+    'proxies: &nodes []\nx-proxies: *nodes\nproxy-groups: []\n',
+    'x-groups: &groups [{name: G, type: select, proxies: [DIRECT]}]\nproxies: []\nproxy-groups: *groups\n',
+    'proxies: []\nproxy-groups: [{name: G, type: select, proxies: [&filter /N/]}]\nx-filter: *filter\n',
+    'proxies: []\nproxy-providers: {remote: {type: http, url: https://provider.example}}\nproxy-groups: [{name: G, type: select, use: [remote]}]\n',
+  ]) {
+    expect(validateTemplate('clashmeta', source).valid).toBe(true);
+    const root = parse(renderSubscription(template('clashmeta', source), [endpoint({ name: 'N' })]).content);
+    expect(root.proxies.at(-1).name).toBe('N');
+    if (root['proxy-groups'].length) expect(root['proxy-groups'][0].proxies).toContain('N');
+    if (root['x-filter']) expect(root['x-filter']).toBe('/N/');
+  }
+});
+test('INI header-like and comment-like names remain policies, not injected sections/comments', () => {
+  const result = renderSubscription(template('surge'), [endpoint({ name: '[Rule]' }), endpoint({ id: 2, name: '// hidden' })]);
+  expect(result.content).toContain('"[Rule]" = trojan'); expect(result.content).toContain('"// hidden" = trojan'); expect(validateTemplate('surge', result.content).valid).toBe(true);
+});
+test('overlapping ungrouped regex repeats are skipped on public rendering paths', () => {
+  const content = JSON.stringify({ outbounds: [{ type: 'selector', tag: 'x', outbounds: ['direct'], include: 'a*a*a*b' }, { type: 'direct', tag: 'direct' }] });
+  const result = renderSubscription(template('singbox', content), [endpoint({ name: 'a'.repeat(256) })]);
+  expect(result.warnings.join('')).toContain('过于复杂'); expect(JSON.parse(result.content).outbounds[0].outbounds).toEqual(['direct']);
+});
+test('native chain private tags avoid static collisions and chains never degrade in cross-format conversions', () => {
+  const e = endpoint({ name: 'N', native_outbounds: [{ type: 'shadowtls', tag: 'outer', server: 'outer.example', server_port: 443 }, { type: 'trojan', tag: 'inner', detour: 'outer' }] });
+  const source = JSON.stringify({ outbounds: [{ type: 'direct', tag: 'N · 1' }, { type: 'selector', tag: 'select', outbounds: [] }] });
+  const result = JSON.parse(renderSubscription(template('singbox', source), [e]).content);
+  expect(new Set(result.outbounds.map((v: any) => v.tag)).size).toBe(result.outbounds.length);
+  expect(result.outbounds.at(-1).detour).toBe('N · 1 (2)');
+  for (const name of ['clashmeta', 'surge'] as const) expect(renderSubscription(template(name), [e]).node_count).toBe(0);
+});
+test('HTTPUpgrade maps normalized host/path to Mihomo WebSocket upgrade options', () => {
+  const result = renderSubscription(template('clashmeta'), [endpoint({ settings: { transport: { type: 'httpupgrade', path: '/upgrade', host: 'upgrade.example' }, tls: { enabled: true } } })]);
+  expect(parse(result.content).proxies[0]).toMatchObject({ network: 'ws', 'ws-opts': { 'v2ray-http-upgrade': true, path: '/upgrade', headers: { Host: 'upgrade.example' } } });
+});
+
+test('legacy structural archive restores five custom formats and semantic sing-box content without rewriting bytes', () => {
+  const db = database();
+  const singbox = '\n' + JSON.stringify({ outbounds: [
+    { type: 'selector', tag: 'Proxy', outbounds: ['auto', 'fallback', 'direct'] },
+    { type: 'urltest', tag: 'auto', outbounds: [], url: 'https://probe.example.test/204', interval: '5m' },
+    { type: 'selector', tag: 'fallback', outbounds: ['direct'], include: 'unmatched', fallback: 'auto' },
+    { type: 'direct', tag: 'direct' },
+  ], route: { final: 'Proxy' }, experimental: { cache_file: { enabled: true } } }, null, 2) + '\n\n';
+  const contents = { singbox, clash: '\n' + legacyYaml, clashmeta: legacyYaml + '\n', stash: legacyYaml, surge: legacyIni, surfboard: '\r\n' + legacyIni };
+  legacy(db, contents); initializeSubscriptionTemplates(db);
+  for (const name of TEMPLATE_NAMES) {
+    const original = getTemplate(db, name)!;
+    const rendered = renderSubscription(original, [endpoint()], { metadata: { app_name: 'Proxy', subs_link: 'https://subscribe.example.test/fake', subs_domain: 'subscribe.example.test', subscribe_info: 'title=Test, content=2GB' } });
+    expect(rendered.node_count).toBe(1); expect(getTemplate(db, name)!.content).toBe(contents[name]);
+    if (name === 'singbox') {
+      const root = JSON.parse(rendered.content);
+      expect(root.outbounds[0].outbounds).toEqual(['auto', 'fallback', 'direct', '香港 HK']);
+      expect(root.outbounds[1].outbounds).toEqual(['香港 HK']);
+      expect(root.outbounds[2].outbounds).toEqual(['direct', 'auto']);
+      expect(root.route).toEqual({ final: 'Proxy' }); expect(root.experimental.cache_file.enabled).toBe(true);
+    }
+  }
+  initializeSubscriptionTemplates(db);
+  for (const name of TEMPLATE_NAMES) expect(getTemplate(db, name)!.content).toBe(contents[name]);
+});
+
+test('real-structure legacy INI renders bare markers once and keeps all 511 rules byte-for-byte', () => {
+  const metadata = { subs_link: 'https://subscribe.example.test/client?token=fake', subs_domain: 'subscribe.example.test', subscribe_info: 'title=Test, content=Upload: 1GB\\nDownload: 2GB' };
+  const db = database(); initializeSubscriptionTemplates(db);
+  for (const name of ['surge', 'surfboard'] as const) {
+    const source = '\r\n' + legacyIni + '\r\n'; saveTemplate(db, name, source);
+    const result = renderSubscription(getTemplate(db, name)!, [endpoint(), endpoint({ id: 2, name: '日本 JP' })], { metadata });
+    expect(result.content).not.toMatch(/\$(?:proxies|proxy_group|subs_link|subs_domain|subscribe_info)\b/);
+    expect(result.content).toContain('Proxy = select, auto, fallback, 香港 HK, 日本 JP');
+    expect(result.content).toContain('auto = url-test, 香港 HK, 日本 JP, url=https://probe.example.test/204, interval=300');
+    expect(result.content).toContain('fallback = fallback, 香港 HK, 日本 JP, url=https://probe.example.test/204, interval=300');
+    expect(result.content.split('香港 HK = trojan')).toHaveLength(2);
+    expect(result.content.slice(result.content.indexOf('[Rule]'))).toBe(source.slice(source.indexOf('[Rule]')));
+    expect(result.content).toContain('#!MANAGED-CONFIG ' + metadata.subs_link);
+    expect(result.content).toContain(metadata.subscribe_info);
+    expect(validateTemplate(name, result.content).valid).toBe(true);
+    expect(getTemplate(db, name)!.content).toBe(source);
+  }
+});
+test('repeated INI markers dedupe authorized definitions and memberships, including empty subscriptions', () => {
+  const source = '[Proxy]\n$proxies\n$proxies\n[Proxy Group]\nProxy=select,auto,DIRECT,$proxy_group,$proxy_group\nauto=url-test,$proxy_group,url=https://probe.example.test,interval=300\n[Rule]\nFINAL,Proxy\n';
+  for (const name of ['surge', 'surfboard'] as const) {
+    const result = renderSubscription(template(name, source), [endpoint({ name: 'node,="\\quoted', credential: 'password,="\\secret' })]);
+    expect(result.content.split(' = trojan')).toHaveLength(2);
+    expect(result.content).toContain('Proxy = select, auto, DIRECT, "node,=\\"\\\\quoted"');
+    expect(result.content).not.toContain('$proxy_group'); expect(result.content).not.toContain('$proxies');
+    expect(validateTemplate(name, result.content).valid).toBe(true);
+    const empty = renderSubscription(template(name, source), []);
+    expect(empty.content).toContain('Proxy = select, auto, DIRECT'); expect(empty.content).not.toContain('$proxy_group');
+    expect(empty.content).not.toContain('$proxies'); expect(empty.node_count).toBe(0);
+  }
+});
+test('INI injection recognizes whole tokens only and leaves comments, option values and Rule data alone', () => {
+  const source = '[Proxy]\n# $proxies documentation\n$proxies_suffix=direct\n[Proxy Group]\nProxy=select,auto,$proxy_group_suffix,url=https://example.test/$proxy_group\nauto=url-test,$proxy_group,url=https://probe.example.test,interval=300\n[Rule]\nDOMAIN,$proxies.example.test,Proxy\nFINAL,Proxy\n';
+  const result = renderSubscription(template('surge', source), [endpoint()]);
+  expect(result.content).toContain('# $proxies documentation');
+  expect(result.content).toContain('$proxies_suffix=direct');
+  expect(result.content).toContain('Proxy = select, auto, $proxy_group_suffix, 香港 HK, url=https://example.test/$proxy_group');
+  expect(result.content.slice(result.content.indexOf('[Rule]'))).toBe(source.slice(source.indexOf('[Rule]')));
+  expect(result.content.split('香港 HK = trojan')).toHaveLength(2);
+});
+test('three real-structure YAML legacy formats expand markers with nested groups and 511 rules intact', () => {
+  const db = database(); initializeSubscriptionTemplates(db);
+  for (const name of ['clash', 'clashmeta', 'stash'] as const) {
+    const source = '\n' + legacyYaml + '\n'; saveTemplate(db, name, source);
+    const result = renderSubscription(getTemplate(db, name)!, [endpoint(), endpoint({ id: 2, name: '日本 JP' })], { metadata: { app_name: 'Proxy' } });
+    const root = parse(result.content);
+    expect(root.proxies).toHaveLength(2);
+    expect(root['proxy-groups'][0].proxies).toEqual(['auto', 'fallback', 'DIRECT', '香港 HK', '日本 JP']);
+    expect(root['proxy-groups'][1].proxies).toEqual(['香港 HK', '日本 JP']);
+    expect(root['proxy-groups'][2].proxies).toEqual(['香港 HK', '日本 JP']);
+    expect(root.rules).toEqual([...legacyRules, 'MATCH,Proxy']);
+    expect(root.dns).toEqual(parse(source).dns);
+    expect(result.content).toContain('# OriginalRestore'); expect(result.content).toContain('# authorized nodes');
+    expect(result.content).not.toMatch(/\$(?:proxies|proxy_group|app_name)\b/);
+    expect(validateTemplate(name, result.content).valid).toBe(true);
+    expect(getTemplate(db, name)!.content).toBe(source);
+  }
+});
+test('YAML markers support sequence, null and aliased scalar forms without duplicating proxies', () => {
+  for (const source of [
+    'proxies: [$proxies, $proxies]\nproxy-groups: [{name: Proxy, type: select, proxies: [DIRECT, $proxy_group, $proxy_group]}]\n',
+    'proxies:\nproxy-groups: [{name: Proxy, type: select, proxies: null}]\n',
+    'x-nodes: &nodes $proxies\nproxies: *nodes\nx-members: &members $proxy_group\nproxy-groups: [{name: Proxy, type: select, proxies: *members}]\n',
+    'proxies: [&marker $proxies]\nproxy-groups: [{name: Proxy, type: select, proxies: [&members $proxy_group]}]\nx-marker: *marker\nx-members: *members\n',
+  ]) {
+    const result = renderSubscription(template('clashmeta', source), [endpoint()]); const root = parse(result.content);
+    expect(root.proxies).toHaveLength(1);
+    expect(root['proxy-groups'][0].proxies.filter((v: string) => v === '香港 HK')).toHaveLength(1);
+    expect(root.proxies.some((v: unknown) => v === '$proxies')).toBe(false);
+    expect(root['proxy-groups'][0].proxies).not.toContain('$proxy_group');
+    if (source.includes('x-nodes')) { expect(root['x-nodes']).toEqual(root.proxies); expect(root['x-members']).toEqual(root['proxy-groups'][0].proxies); }
+    if (source.includes('x-marker')) { expect(root['x-marker']).toBe('$proxies'); expect(root['x-members']).toBe('$proxy_group'); }
+    const empty = parse(renderSubscription(template('clashmeta', source), []).content);
+    expect(empty.proxies).toEqual([]); expect(empty['proxy-groups'][0].proxies).not.toContain('$proxy_group');
+  }
+});
+test('metadata is escaped as YAML scalars, strips controls and never reprocesses endpoint fields', () => {
+  const source = 'proxies: []\nproxy-groups: [{name: "$app_name", type: select, proxies: [DIRECT]}]\nrules: ["MATCH,$app_name"]\nx-name: "$app_name_suffix"\n';
+  const app_name = 'Site: "quoted"\nproxies: []';
+  const result = renderSubscription(template('clashmeta', source), [endpoint({ name: '$app_name', credential: '$app_name-password' })], { metadata: { app_name } });
+  const root = parse(result.content);
+  expect(root['proxy-groups'][0].name).toBe('Site: "quoted" proxies: []');
+  expect(root.rules).toEqual(['MATCH,Site: "quoted" proxies: []']);
+  expect(root['x-name']).toBe('$app_name_suffix'); expect(root.proxies[0].name).toBe('$app_name');
+  expect(root.proxies[0].password).toBe('$app_name-password');
+  const ini = renderSubscription(template('surge', legacyIni), [endpoint({ name: '$subs_link', credential: '$subscribe_info' })], { metadata: { subs_link: 'https://example.test/fake\n[Rule]\r\nINJECT', subscribe_info: 'title=Test, content=2GB\0safe' } });
+  expect(ini.content.split('[Rule]')).toHaveLength(3); // One header, one sanitized literal in the managed-config comment.
+  expect(ini.content).toContain('#!MANAGED-CONFIG https://example.test/fake [Rule]  INJECT');
+  expect(ini.content).toContain('$subs_link = trojan'); expect(ini.content).toContain('password=$subscribe_info');
+  expect(ini.content).toContain('title=Test, content=2GB safe');
+  expect(validateTemplate('surge', ini.content).valid).toBe(true);
+});
+
+test('preview and actual subscriptions share one result contract and only their supplied endpoints', () => {
+  const t = template('singbox'); const preview = renderSubscription(t, [endpoint({ host: 'preview.invalid', credential: 'preview-only' })]); const real = renderSubscription(t, [endpoint()]);
+  expect(Object.keys(preview).sort()).toEqual(['content', 'content_type', 'node_count', 'template_name', 'warnings']);
+  expect(preview.content).toContain('preview-only'); expect(real.content).not.toContain('preview-only'); expect(preview.content).not.toContain('synthetic-password');
+});

@@ -34,6 +34,7 @@ import {
   useToast,
 } from "./ui";
 import { TrafficChart } from "./TrafficChart";
+import { SubscriptionTemplates } from "./SubscriptionTemplates";
 
 const ROOT = "/api/v1/admin";
 const count = (value: number) => value.toLocaleString("zh-CN");
@@ -55,7 +56,7 @@ type Resource<T> = {
   reload: () => void;
 };
 type Column<T> = { label: string; render: (row: T) => ReactNode };
-type WithId = { id: number };
+type WithId = { id: number; runtime?: boolean };
 type AdminUser = User & { group_ids?: number[] };
 type ImportedNode = {
   id: number;
@@ -551,7 +552,7 @@ function CrudPage<T extends WithId, D>({
                 <Table
                   rows={filtered}
                   columns={columns}
-                  actions={(item) => (
+                  actions={(item) => item.runtime ? <Badge tone="info">完整配置已恢复</Badge> : (
                     <>
                       <Button
                         variant="ghost"
@@ -2061,7 +2062,7 @@ function SettingsPage() {
       <PageHeader
         title="站点设置"
         eyebrow="管理工作台"
-        description="调整站点名称和介绍，查阅管理操作记录。"
+        description="调整站点信息和订阅模板，查阅管理操作记录。"
       />
       <Card>
         <div className="card-header">
@@ -2129,6 +2130,7 @@ function SettingsPage() {
           </ResourceView>
         </div>
       </Card>
+      <SubscriptionTemplates onSaved={audit.reload} />
       <Card>
         <div className="card-header mb-custom-toolbar">
           <div>
