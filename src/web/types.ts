@@ -30,6 +30,12 @@ export interface Node {
   server_name: string;
   online: boolean;
   created_at: string;
+  runtime?: boolean;
+  parent_id?: number | null;
+  show?: boolean;
+  server_port?: number;
+  machine_ids?: number[];
+  state?: string;
 }
 export interface Machine {
   id: number;

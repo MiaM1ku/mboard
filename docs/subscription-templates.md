@@ -13,7 +13,7 @@ validateTemplate(name: string, content: string): TemplateValidation
 selectSubscriptionFormat(
   userAgent: string | null | undefined,
   query?: URLSearchParams | Record<string, string | undefined>
-): TemplateName
+): TemplateName | 'shadowrocket' | 'quantumultx' | 'loon'
 renderSubscription(
   template: Pick<SubscriptionTemplate, 'name' | 'content'>,
   endpoints: SubscriptionEndpoint[],
@@ -21,7 +21,7 @@ renderSubscription(
 ): SubscriptionRender
 ```
 
-Supported names are exactly `singbox`, `clash`, `clashmeta`, `stash`, `surge`, `surfboard`. Template names are not normalized during archive import. Template records contain `{ id, name, content, created_at, updated_at, source }`. `source` is `archive`, `builtin` or `custom`. List and get include the original content, so route authentication must protect these admin operations.
+Stored template names are exactly `singbox`, `clash`, `clashmeta`, `stash`, `surge`, `surfboard`. Template names are not normalized during archive import. Shadowrocket, Quantumult X (`quantumultx`, `quanx`) and Loon are selected by User-Agent or `flag`, then rendered as share links. They have no template row. Template records contain `{ id, name, content, created_at, updated_at, source }`. `source` is `archive`, `builtin` or `custom`. List and get include the original content, so route authentication must protect these admin operations.
 
 `TemplateValidation` is `{ valid, errors: [{ message, line?, column? }], warnings }`. Validation failures throw `TemplateValidationError` from save/render/selection, with `status = 400` and safe Chinese messages. Return `issues` to the administrator without exposing parser errors or stack traces. JSON parser positions are supplied only when the runtime exposes a numeric offset. YAML and INI errors include positive line/column positions when available.
 

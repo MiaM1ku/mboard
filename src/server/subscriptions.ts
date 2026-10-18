@@ -20,10 +20,13 @@ export interface TemplateValidation { valid: boolean; errors: TemplateIssue[]; w
 export interface RenderOptions {
   userAgent?: string; clientVersion?: string;
   /** Supplied by the caller; rendering never derives user metadata or reads it from the DB. */
-  metadata?: { app_name?: string; subs_link?: string; subs_domain?: string; subscribe_info?: string };
+  metadata?: { app_name?: string; subs_link?: string; subs_domain?: string; subscribe_info?: string; upload_bytes?: number; download_bytes?: number; quota_bytes?: number; expires_at?: string | null };
 }
+export const SHARE_FORMATS = ['shadowrocket', 'quantumultx', 'loon'] as const;
+export type ShareFormat = typeof SHARE_FORMATS[number];
+export type SubscriptionFormat = TemplateName | ShareFormat;
 export interface SubscriptionRender {
-  template_name: TemplateName; content_type: string; content: string; node_count: number; warnings: string[];
+  template_name: SubscriptionFormat; content_type: string; content: string; node_count: number; warnings: string[];
 }
 export class TemplateValidationError extends Error {
   readonly status = 400;
@@ -236,13 +239,16 @@ export function validateTemplate(name: string, content: string): TemplateValidat
     return { valid: false, errors: error instanceof TemplateValidationError ? error.issues : [{ message: '请检查模板格式后重试解析。' }], warnings: [] };
   }
 }
-const aliases: Record<string, TemplateName> = { singbox: 'singbox', 'sing-box': 'singbox', json: 'singbox', clash: 'clash', clashmeta: 'clashmeta', 'clash-meta': 'clashmeta', meta: 'clashmeta', mihomo: 'clashmeta', stash: 'stash', surge: 'surge', surfboard: 'surfboard' };
-export function selectSubscriptionFormat(userAgent: string | null | undefined, query: URLSearchParams | Record<string, string | undefined> = {}): TemplateName {
+const aliases: Record<string, SubscriptionFormat> = { singbox: 'singbox', 'sing-box': 'singbox', json: 'singbox', clash: 'clash', clashmeta: 'clashmeta', 'clash-meta': 'clashmeta', meta: 'clashmeta', mihomo: 'clashmeta', stash: 'stash', surge: 'surge', surfboard: 'surfboard', shadowrocket: 'shadowrocket', quantumultx: 'quantumultx', quanx: 'quantumultx', 'quantumult-x': 'quantumultx', loon: 'loon' };
+export function selectSubscriptionFormat(userAgent: string | null | undefined, query: URLSearchParams | Record<string, string | undefined> = {}): SubscriptionFormat {
   const get = (key: string) => query instanceof URLSearchParams ? query.get(key) : query[key];
   // format is the most explicit option. Invalid explicit values never silently choose another format.
   const explicit = get('format') || get('target') || get('flag');
   if (explicit) { const selected = aliases[explicit.toLowerCase()]; if (!selected) throw issue('请选择支持的订阅格式。'); return selected; }
   const ua = userAgent || '';
+  if (/shadowrocket/i.test(ua)) return 'shadowrocket';
+  if (/quantumult(?:%20|[+\s_-])?x/i.test(ua)) return 'quantumultx';
+  if (/\bloon\b/i.test(ua)) return 'loon';
   if (/surfboard/i.test(ua)) return 'surfboard';
   if (/surge/i.test(ua)) return 'surge';
   if (/stash/i.test(ua)) return 'stash';
@@ -633,6 +639,18 @@ function metadataText(text: string, metadata: RenderOptions['metadata'], keys: s
     return keys.includes(key) && typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ') : marker;
   });
 }
+const TENCENT_IX_HOST = 'tx.example';
+const TENCENT_IX_IPS = ['192.0.2.10', '192.0.2.11'];
+function expandLoadBalance(proxies: Record<string, any>[]): { proxies: Record<string, any>[]; groups: Record<string, any>[] } {
+  const next: Record<string, any>[] = [], groups: Record<string, any>[] = [];
+  for (const proxy of proxies) {
+    if (proxy.server !== TENCENT_IX_HOST) { next.push(proxy); continue; }
+    const members = TENCENT_IX_IPS.map((ip, index) => ({ ...structuredClone(proxy), name: `${proxy.name} · ${index + 1}`, server: ip, hidden: true }));
+    next.push(...members);
+    groups.push({ name: proxy.name, type: 'load-balance', strategy: 'round-robin', url: 'http://cp.cloudflare.com/', interval: 300, lazy: true, proxies: members.map(member => member.name) });
+  }
+  return { proxies: next, groups };
+}
 /** Render ONLY caller-authorized endpoints. No DB lookups, executable templates or provider network requests. */
 export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' | 'content'>, endpoints: SubscriptionEndpoint[], options: RenderOptions = {}): SubscriptionRender {
   const name = templateName(template.name), validation = validateTemplate(name, template.content);
@@ -693,7 +711,8 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
     migrateSingboxRendered(root!, version(options, 'singbox'), warnings);
     content = JSON.stringify(root, null, 2) + '\n';
   } else if (root && doc) {
-    const generated = permitted.map(yamlOutbound);
+    const balanced = expandLoadBalance(permitted.map(yamlOutbound));
+    const generated = balanced.proxies;
     const dialer=clashMetaDialer(root,name);
     if(dialer){
       if(dialer.provider){
@@ -745,6 +764,10 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
         for (const item of oldItems) if (isScalar(item) && item.anchor) removedAnchors.set(item.anchor, item.value);
       } else replaceSequence(groupNode, 'proxies', membersNode, root['proxy-groups'][i].proxies);
     }
+    for (const group of balanced.groups) {
+      root['proxy-groups'].push(group);
+      groupsNode.add(doc.createNode(group));
+    }
     // A regex token can be anchored and referenced in an unrelated section. Keep that section's value
     // when the token is removed from proxy memberships, rather than leaving an unresolved alias.
     if (removedAnchors.size) visit(doc, { Alias(_key, node) {
@@ -753,4 +776,141 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
     try { content = String(doc); } catch { throw issue('请检查 YAML 动态分组锚点，再重试解析。'); }
   } else content = fillIni(ini!, permitted.map(e => iniOutbound(e, name)), names, warnings);
   return { template_name: name, content_type: name === 'singbox' ? 'application/json; charset=utf-8' : root ? 'text/yaml; charset=utf-8' : 'text/plain; charset=utf-8', content, node_count: permitted.length, warnings };
+}
+function rawurlencode(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+function shareQuery(params: Record<string, string | number | undefined>): string {
+  return Object.entries(params).filter((entry): entry is [string, string | number] => entry[1] !== undefined).map(([key, value]) => `${rawurlencode(key)}=${rawurlencode(String(value))}`).join('&');
+}
+function wrapIPv6(host: string): string { return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host; }
+function shareBuild(options: RenderOptions): number | undefined {
+  const raw = options.clientVersion || (options.userAgent || '').match(/shadowrocket\/(\d+)/i)?.[1];
+  return raw && /^\d+$/.test(raw) ? Number(raw) : undefined;
+}
+type ShareNet = { type: 'tcp' | 'ws' | 'grpc' | 'h2' | 'httpupgrade'; path?: string; host?: string; service?: string };
+function shareNetwork(e: SubscriptionEndpoint): ShareNet | null {
+  const transport = e.settings?.transport;
+  if (!transport || transport.type === 'tcp') return { type: 'tcp' };
+  const type = transport.type === 'http' ? 'h2' : transport.type;
+  if (!['ws', 'grpc', 'h2', 'httpupgrade'].includes(type)) return null;
+  const headerHost = transport.headers?.Host ?? transport.headers?.host;
+  const host = Array.isArray(transport.host) ? transport.host[0] : transport.host || headerHost;
+  return { type, path: transport.path ? String(transport.path) : undefined, host: host ? String(host) : undefined, service: String(transport.service_name || transport.serviceName || '') };
+}
+function shareLabel(value: string): string { return value.replace(/[\r\n\0,=]/g, ' ').replace(/\s+/g, ' ').trim(); }
+/** URI subscriptions for clients that cannot import sing-box JSON. Not stored templates. */
+export function renderShareLinks(format: ShareFormat, endpoints: SubscriptionEndpoint[], options: RenderOptions = {}): SubscriptionRender {
+  const warnings: string[] = []; const lines: string[] = []; let count = 0;
+  const build = shareBuild(options);
+  const gb = (value: number | undefined) => { const n = Number(value); return Number.isFinite(n) && n > 0 ? String(Math.round(n / 1073741824 * 100) / 100) : '0'; };
+  if (format === 'shadowrocket') {
+    const quota = Number(options.metadata?.quota_bytes);
+    const total = Number.isFinite(quota) && quota > 0 ? `${gb(quota)}GB` : '不限';
+    const expires = options.metadata?.expires_at ? String(options.metadata.expires_at).slice(0, 10) : '长期有效';
+    lines.push(`STATUS=🚀↑:${gb(options.metadata?.upload_bytes)}GB,↓:${gb(options.metadata?.download_bytes)}GB,TOT:${total}💡Expires:${expires}`);
+  }
+  for (const endpoint of endpoints) {
+    const settings = endpoint.settings || {}, tls = settings.tls || {}, protocol = endpoint.protocol === 'ss' ? 'shadowsocks' : endpoint.protocol;
+    const net = shareNetwork(endpoint);
+    const unsafe = [endpoint.name, endpoint.host, endpoint.credential].some(value => typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value));
+    const supported = net && ['shadowsocks', 'vless', 'trojan', 'anytls'].includes(protocol) && Number.isInteger(endpoint.port) && endpoint.port >= 1 && endpoint.port <= 65535;
+    const ssMethod = protocol === 'shadowsocks' ? settings.method : undefined;
+    const ssOk = protocol !== 'shadowsocks' || [...classicSS, ...ss2022].includes(ssMethod);
+    const blocked = endpoint.native_outbounds?.length || settings.plugin || settings.plugin_opts || tls.ech?.enabled || settings.multiplex?.enabled || tls.certificate || tls.certificate_path || tls.client_certificate || tls.client_key;
+    const oldAnytls = format === 'shadowrocket' && protocol === 'anytls' && build !== undefined && build < 2592;
+    const loonTrojanReality = format === 'loon' && protocol === 'trojan' && tls.reality?.enabled;
+    const qxTransport = format === 'quantumultx' && net && !['tcp', 'ws'].includes(net.type);
+    if (!supported || !ssOk || blocked || oldAnytls || loonTrojanReality || qxTransport || unsafe) { warn(warnings, '请按目标客户端版本和协议参数配置节点，再刷新输出。'); continue; }
+    const addr = wrapIPv6(endpoint.host), remark = rawurlencode(endpoint.name);
+    const line = format === 'shadowrocket' ? shadowrocketLine(endpoint, protocol, addr, remark, net!, tls, settings)
+      : format === 'quantumultx' ? quantumultLine(endpoint, protocol, addr, net!, tls, settings)
+      : loonLine(endpoint, protocol, net!, tls, settings);
+    if (!line) { warn(warnings, '请按目标客户端版本和协议参数配置节点，再刷新输出。'); continue; }
+    lines.push(line); count++;
+  }
+  const body = lines.filter(Boolean).join('\r\n') + (lines.length ? '\r\n' : '');
+  const content = format === 'loon' ? body : Buffer.from(body, 'utf8').toString('base64');
+  return { template_name: format, content_type: 'text/plain; charset=utf-8', content, node_count: count, warnings };
+}
+function shadowrocketLine(e: SubscriptionEndpoint, protocol: string, addr: string, remark: string, net: ShareNet, tls: Record<string, any>, settings: Record<string, any>): string {
+  if (protocol === 'shadowsocks') {
+    const user = Buffer.from(`${settings.method}:${e.credential}`, 'utf8').toString('base64').replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+    return `ss://${user}@${addr}:${e.port}#${remark}`;
+  }
+  if (protocol === 'anytls') return `anytls://${rawurlencode(e.credential)}@${addr}:${e.port}?${shareQuery({ sni: tls.server_name, insecure: tls.insecure ? 1 : undefined })}#${remark}`;
+  if (protocol === 'trojan') {
+    const params: Record<string, string | number | undefined> = { tfo: 1 };
+    if (tls.reality?.enabled) Object.assign(params, { security: 'reality', pbk: tls.reality.public_key, sid: tls.reality.short_id, sni: tls.server_name });
+    else Object.assign(params, { allowInsecure: tls.insecure ? 1 : 0, peer: tls.server_name });
+    if (net.type === 'ws') params.plugin = `obfs-local;obfs=websocket;obfs-host=${net.host || ''};obfs-uri=${net.path || ''}`;
+    else if (net.type === 'grpc') Object.assign(params, { obfs: 'grpc', path: net.service });
+    else if (net.type === 'h2' || net.type === 'httpupgrade') Object.assign(params, { obfs: net.type, path: net.path, obfsParam: net.host });
+    return `trojan://${rawurlencode(e.credential)}@${addr}:${e.port}?${shareQuery(params)}#${remark}`;
+  }
+  const user = Buffer.from(`auto:${e.credential}@${addr}:${e.port}`, 'utf8').toString('base64');
+  const params: Record<string, string | number | undefined> = { tfo: 1, remark: e.name };
+  const xtls: Record<string, number> = { none: 0, 'xtls-rprx-direct': 1, 'xtls-rprx-vision': 2 };
+  if (settings.flow in xtls) Object.assign(params, { tls: 1, xtls: xtls[settings.flow] });
+  if (tls.reality?.enabled) Object.assign(params, { tls: 1, sni: tls.server_name, pbk: tls.reality.public_key, sid: tls.reality.short_id, fp: tls.utls?.fingerprint });
+  else if (tls.enabled) Object.assign(params, { tls: 1, allowInsecure: tls.insecure ? 1 : 0, peer: tls.server_name, fp: tls.utls?.fingerprint });
+  if (net.type === 'ws') Object.assign(params, { obfs: 'websocket', path: net.path, obfsParam: net.host });
+  else if (net.type === 'grpc') Object.assign(params, { obfs: 'grpc', path: net.service, host: tls.server_name || e.host });
+  else if (net.type === 'h2' || net.type === 'httpupgrade') Object.assign(params, { obfs: net.type, path: net.path, obfsParam: net.host });
+  return `vless://${user}?${shareQuery(params)}`;
+}
+function quantumultLine(e: SubscriptionEndpoint, protocol: string, addr: string, net: ShareNet, tls: Record<string, any>, settings: Record<string, any>): string {
+  const tag = shareLabel(e.name);
+  if (!tag || /[,\r\n]/.test(e.credential) || (protocol === 'shadowsocks' && /[,\r\n]/.test(String(settings.method || '')))) return '';
+  const fields = protocol === 'shadowsocks' ? [`shadowsocks=${addr}:${e.port}`, `method=${settings.method}`, `password=${e.credential}`]
+    : protocol === 'vless' ? [`vless=${addr}:${e.port}`, 'method=none', `password=${e.credential}`]
+    : protocol === 'trojan' ? [`trojan=${addr}:${e.port}`, `password=${e.credential}`]
+    : [`anytls=${addr}:${e.port}`, `password=${e.credential}`, 'udp-relay=true', `tag=${tag}`, 'over-tls=true'];
+  if (protocol === 'anytls') {
+    if (!tls.insecure) fields.push('tls-verification=true');
+    if (tls.server_name) fields.push(`tls-host=${tls.server_name}`);
+    return fields.join(',');
+  }
+  if (protocol === 'vless' || protocol === 'trojan') {
+    const native = protocol === 'trojan';
+    if (net.type === 'ws') fields.push(tls.reality?.enabled || tls.enabled ? 'obfs=wss' : 'obfs=ws', ...(net.path ? [`obfs-uri=${net.path}`] : []));
+    else if (tls.reality?.enabled || tls.enabled) fields.push(native ? 'over-tls=true' : 'obfs=over-tls');
+    if (tls.reality?.enabled) {
+      if (tls.reality.public_key) fields.push(`reality-base64-pubkey=${tls.reality.public_key}`);
+      if (typeof tls.reality.short_id === 'string') fields.push(`reality-hex-shortid=${tls.reality.short_id}`);
+    } else if (tls.enabled) fields.push(`tls-verification=${tls.insecure ? 'false' : 'true'}`);
+    const host = net.host || tls.server_name;
+    if (host) fields.push(native && net.type !== 'ws' ? `tls-host=${host}` : `obfs-host=${host}`);
+    if (protocol === 'vless' && settings.flow) fields.push(`vless-flow=${settings.flow}`);
+  }
+  fields.push('fast-open=true', 'udp-relay=true', `tag=${tag}`);
+  return fields.join(',');
+}
+function loonLine(e: SubscriptionEndpoint, protocol: string, net: ShareNet, tls: Record<string, any>, settings: Record<string, any>): string {
+  const name = shareLabel(e.name);
+  if (!name || /[,\r\n]/.test(e.credential)) return '';
+  const fields = protocol === 'shadowsocks' ? [name + '=Shadowsocks', e.host, String(e.port), String(settings.method), e.credential, 'fast-open=false', 'udp=true']
+    : protocol === 'trojan' ? [name + '=trojan', e.host, String(e.port), e.credential]
+    : protocol === 'anytls' ? [name + '=anytls', e.host, String(e.port), e.credential, 'udp=true']
+    : [name + '=VLESS', e.host, String(e.port), e.credential, 'alterId=0', 'udp=true'];
+  if (protocol === 'vless' && settings.flow) fields.push(`flow=${settings.flow}`);
+  if (protocol === 'anytls') { if (tls.server_name) fields.push(`sni=${tls.server_name}`); if (tls.insecure) fields.push('skip-cert-verify=true'); return fields.join(','); }
+  if (protocol === 'shadowsocks') return fields.join(',');
+  if (tls.reality?.enabled) {
+    fields.push('over-tls=true', `skip-cert-verify=${tls.insecure ? 'true' : 'false'}`);
+    if (tls.server_name) fields.push(`${protocol === 'trojan' ? 'tls-name' : 'sni'}=${tls.server_name}`);
+    if (tls.reality.public_key) fields.push(`${protocol === 'trojan' ? 'public-key' : 'public-key'}=${tls.reality.public_key}`);
+    if (typeof tls.reality.short_id === 'string') fields.push(`${protocol === 'trojan' ? 'short-id' : 'short-id'}=${tls.reality.short_id}`);
+  } else if (tls.enabled || protocol === 'trojan') {
+    if (protocol === 'vless') fields.push('over-tls=true');
+    fields.push(`${protocol === 'vless' ? 'skip-cert-verify' : 'skip-cert-verify'}=${tls.insecure ? 'true' : 'false'}`);
+    if (tls.server_name) fields.push(`${protocol === 'vless' ? 'sni' : 'tls-name'}=${tls.server_name}`);
+  } else if (protocol === 'vless') fields.push('over-tls=false');
+  if (protocol === 'vless' || (protocol === 'trojan' && net.type !== 'tcp')) {
+    fields.push(`transport=${net.type}`);
+    if (net.path) fields.push(`path=${net.path}`);
+    if (net.host) fields.push(`host=${net.host}`);
+    if (net.type === 'grpc' && net.service) fields.push(`grpc-service-name=${net.service}`);
+  }
+  return fields.join(',');
 }

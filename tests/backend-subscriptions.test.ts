@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import {
   getTemplate, initializeSubscriptionTemplates, listTemplates, MAX_TEMPLATE_BYTES,
-  renderSubscription, saveTemplate, selectSubscriptionFormat, TEMPLATE_NAMES, TemplateValidationError,
+  renderShareLinks, renderSubscription, saveTemplate, selectSubscriptionFormat, TEMPLATE_NAMES, TemplateValidationError,
   validateTemplate, type SubscriptionEndpoint, type TemplateName,
 } from '../src/server/subscriptions';
 
@@ -97,6 +97,20 @@ test('invalid or unsafe YAML exclude selectors keep generated members excluded r
  for(const pattern of ['[','(?=private-secret)']){const content=JSON.stringify({proxies:[],'proxy-groups':[{name:'safe',type:'select',proxies:['DIRECT','$proxy_group'],filter:'US|HK','exclude-filter':pattern}],rules:['MATCH,safe']});const result=renderSubscription(template('clashmeta',content),[endpoint({name:'US'}),endpoint({id:2,name:'HK'})]);expect(parse(result.content)['proxy-groups'][0].proxies).toEqual(['DIRECT']);expect(result.warnings.length).toBeGreaterThan(0);expect(result.warnings.join('')).not.toContain('private-secret')}
 });
 
+test('tencent ix hostname becomes one load-balance group over two hidden addresses', () => {
+  const content = 'proxies: []\nproxy-groups:\n  - {name: 选择, type: select, proxies: [DIRECT]}\n  - {name: 香港自动, type: url-test, filter: "(?i)🇭🇰|港|HK", url: http://cp.cloudflare.com/, interval: 600}\nrules: ["MATCH,选择"]\n';
+  const result = renderSubscription(template('clashmeta', content), [endpoint({ name: '🇭🇰Bage@腾讯IX', host: 'tx.example', port: 50000 }), endpoint({ id: 2, name: '其他节点', host: 'direct.example.test' })]);
+  const root = parse(result.content);
+  const hidden = root.proxies.filter((proxy: { hidden?: boolean }) => proxy.hidden);
+  expect(hidden.map((proxy: { server: string }) => proxy.server)).toEqual(['192.0.2.10', '192.0.2.11']);
+  expect(root.proxies.filter((proxy: { hidden?: boolean }) => !proxy.hidden).map((proxy: { server: string }) => proxy.server)).toEqual(['direct.example.test']);
+  const balance = root['proxy-groups'].find((group: { name: string }) => group.name === '🇭🇰Bage@腾讯IX');
+  expect(balance).toMatchObject({ type: 'load-balance', strategy: 'round-robin', proxies: hidden.map((proxy: { name: string }) => proxy.name) });
+  const select = root['proxy-groups'].find((group: { name: string }) => group.name === '选择');
+  expect(select.proxies).toContain('🇭🇰Bage@腾讯IX');
+  expect(select.proxies.some((name: string) => hidden.some((proxy: { name: string }) => proxy.name === name))).toBe(false);
+  expect(result.content).not.toContain('tx.example');
+});
 test('six archived original records seed before defaults, including names, IDs, timestamps and exact bytes', () => {
   const db = database(); legacy(db, synthetic); initializeSubscriptionTemplates(db);
   expect(listTemplates(db)).toHaveLength(6);
@@ -148,6 +162,52 @@ test('explicit format/target, recognized UA priority, aliases and default singbo
   for (const [ua, name] of [['sing-box/1.12.0', 'singbox'], ['Hiddify', 'singbox'], ['SFM', 'singbox'], ['Clash', 'clash'], ['ClashX Meta', 'clashmeta'], ['ClashMetaForAndroid', 'clashmeta'], ['mihomo/1.19.1', 'clashmeta'], ['Clash Verge', 'clashmeta'], ['Stash/3.3.0', 'stash'], ['Surge iOS', 'surge'], ['Surfboard', 'surfboard']] as const) expect(selectSubscriptionFormat(ua)).toBe(name);
   expect(selectSubscriptionFormat('unknown-client')).toBe('singbox');
   expect(() => selectSubscriptionFormat('', { format: 'exe' })).toThrow('支持的订阅格式');
+  expect(selectSubscriptionFormat('Shadowrocket/2592 CFNetwork/1494 Darwin/23.4.0')).toBe('shadowrocket');
+  expect(selectSubscriptionFormat('Quantumult%20X/1.0.30')).toBe('quantumultx');
+  expect(selectSubscriptionFormat('Quantumult X/1.0.29')).toBe('quantumultx');
+  expect(selectSubscriptionFormat('Loon/3.2.1')).toBe('loon');
+  expect(selectSubscriptionFormat('Shadowrocket/2592', { format: 'singbox' })).toBe('singbox');
+  expect(selectSubscriptionFormat('browser', new URLSearchParams('flag=quanx'))).toBe('quantumultx');
+});
+test('shadowrocket, quantumult x and loon receive share links instead of sing-box json', () => {
+  const nodes = [
+    endpoint({ name: '🇭🇰 Reality', protocol: 'vless', credential: '12345678-1234-4234-8234-123456789abc', settings: { flow: 'xtls-rprx-vision', tls: { enabled: true, server_name: 'example.test', utls: { fingerprint: 'chrome' }, reality: { enabled: true, public_key: 'PUBLIC_KEY', short_id: 'abcd' } } } }),
+    endpoint({ id: 2, name: 'SS2022', protocol: 'shadowsocks', port: 20180, credential: 'c2VydmVy:dXNlcg', settings: { method: '2022-blake3-aes-128-gcm' } }),
+    endpoint({ id: 3, name: 'Trojan', protocol: 'trojan', settings: { tls: { enabled: true, server_name: 'sni.example.test', reality: { enabled: true, public_key: 'PUBLIC_KEY', short_id: 'ab' } } } }),
+    endpoint({ id: 4, name: 'AnyTLS', protocol: 'anytls', settings: { tls: { enabled: true, server_name: 'sg.example.test' } } }),
+  ];
+  const rocket = renderShareLinks('shadowrocket', nodes, { userAgent: 'Shadowrocket/2592', metadata: { upload_bytes: 1024 ** 3, download_bytes: 0, quota_bytes: 0, expires_at: null } });
+  const text = Buffer.from(rocket.content, 'base64').toString('utf8');
+  expect(rocket.content_type).toContain('text/plain');
+  expect(rocket.node_count).toBe(4);
+  expect(text).toContain('STATUS=🚀↑:1GB,↓:0GB,TOT:不限💡Expires:长期有效');
+  expect(text).toContain('xtls=2');
+  expect(text).toContain('pbk=PUBLIC_KEY');
+  expect(text).toContain('sid=abcd');
+  expect(text).toContain('fp=chrome');
+  expect(text).toContain(`ss://${Buffer.from('2022-blake3-aes-128-gcm:c2VydmVy:dXNlcg').toString('base64').replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}@authorized.example.test:20180`);
+  expect(text).toContain('security=reality');
+  expect(text).toContain('anytls://synthetic-password@authorized.example.test:443?sni=sg.example.test');
+  const old = renderShareLinks('shadowrocket', nodes, { userAgent: 'Shadowrocket/1990' });
+  expect(Buffer.from(old.content, 'base64').toString('utf8')).not.toContain('anytls://');
+  expect(old.node_count).toBe(3);
+  const qx = Buffer.from(renderShareLinks('quantumultx', nodes).content, 'base64').toString('utf8');
+  expect(qx).toContain('vless=authorized.example.test:443,method=none,password=12345678-1234-4234-8234-123456789abc');
+  expect(qx).toContain('reality-base64-pubkey=PUBLIC_KEY');
+  expect(qx).toContain('reality-hex-shortid=abcd');
+  expect(qx).toContain('vless-flow=xtls-rprx-vision');
+  expect(qx).toContain('trojan=authorized.example.test:443,password=synthetic-password,over-tls=true');
+  expect(qx).toContain('anytls=authorized.example.test:443,password=synthetic-password');
+  const loon = renderShareLinks('loon', nodes);
+  expect(loon.content.startsWith('🇭🇰 Reality=VLESS,')).toBe(true);
+  expect(loon.content).toContain('public-key=PUBLIC_KEY');
+  expect(loon.content).toContain('=anytls,');
+  expect(loon.content).not.toContain('=trojan,');
+  expect(loon.node_count).toBe(3);
+  const skipped = renderShareLinks('shadowrocket', [endpoint({ protocol: 'vmess', credential: 'invented-secret' })]);
+  expect(skipped.node_count).toBe(0);
+  expect(skipped.warnings.join('') + Buffer.from(skipped.content, 'base64').toString('utf8')).not.toContain('invented-secret');
+  expect(renderShareLinks('quantumultx', [endpoint({ protocol: 'vless', settings: { transport: { type: 'grpc', service_name: 'tun' }, tls: { enabled: true, server_name: 'sni.example.test' } } })]).node_count).toBe(0);
 });
 test('invalid JSON, YAML and INI errors are generic Chinese issues without raw credentials', () => {
   for (const [name, content] of [

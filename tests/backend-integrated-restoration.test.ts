@@ -206,7 +206,7 @@ describe('subscription template REST integration', () => {
   test('actual multi-format subscriptions convert SS2022/Reality, respect UA/query, and never expose private material', async () => {
     const f=fixture();f.activate();await f.heartbeat();const path='/s/'+'a'.repeat(64);
     for(const format of ['singbox','clashmeta','stash','surge','surfboard','clash']){
-      const r=await f.request(path+'?format='+format);expect(r.status).toBe(200);expect(r.response.headers.get('cache-control')).toBe('no-store');expect(r.text).not.toContain(privateKey);
+      const r=await f.request(path+'?format='+format);expect(r.status).toBe(200);expect(r.response.headers.get('cache-control')).toBe('no-store');expect(r.response.headers.get('subscription-userinfo')).toBe(`upload=0; download=0; total=1000; expire=${Math.floor(Date.parse(future)/1000)}`);expect(r.response.headers.get('profile-update-interval')).toBe('24');expect(r.text).not.toContain(privateKey);
       if(format==='singbox'){const nodes=JSON.parse(r.text).outbounds.filter((o:any)=>o.server);expect(nodes).toHaveLength(2);expect(nodes[0].method).toBe('2022-blake3-aes-128-gcm');expect(nodes[1].tls.reality.public_key).toBe('synthetic-public-key');}
       else if(['clashmeta','stash'].includes(format)){const root=parse(r.text);expect(root.proxies).toHaveLength(2);expect(root.proxies[0].cipher).toBe('2022-blake3-aes-128-gcm');expect(root.proxies[1]['reality-opts']['public-key']).toBe('synthetic-public-key');}
       else if(format==='clash')expect(parse(r.text).proxies).toEqual([]);else {expect(r.text).toContain('Restored SS2022 = ss');expect(r.text).not.toContain('Restored Reality =');}

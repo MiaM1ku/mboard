@@ -265,6 +265,7 @@ type CrudProps<T extends WithId, D> = {
   saveBlocked?: boolean;
   validate?: (draft: D) => string;
   toolbar?: ReactNode;
+  runtimeAction?: (item: T) => ReactNode;
 };
 function CrudPage<T extends WithId, D>({
   title,
@@ -285,6 +286,7 @@ function CrudPage<T extends WithId, D>({
   saveBlocked,
   validate,
   toolbar,
+  runtimeAction,
 }: CrudProps<T, D>) {
   const { notify } = useToast();
   const formId = useId();
@@ -408,7 +410,7 @@ function CrudPage<T extends WithId, D>({
                 <Table
                   rows={filtered}
                   columns={columns}
-                  actions={(item) => item.runtime ? <Badge tone="info">运行配置</Badge> : (
+                  actions={(item) => item.runtime ? (runtimeAction?.(item) ?? <Badge tone="info">运行配置</Badge>) : (
                     <>
                       <Button
                         variant="ghost"
@@ -680,12 +682,34 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
   );
 }
 
+type QuotaUnit = "MB" | "GB" | "TB";
+const QUOTA_UNIT: Record<QuotaUnit, number> = {
+  MB: 1024 ** 2,
+  GB: 1024 ** 3,
+  TB: 1024 ** 4,
+};
+function quotaParts(bytes: number): { quota_amount: string; quota_unit: QuotaUnit } {
+  if (!bytes) return { quota_amount: "0", quota_unit: "GB" };
+  for (const unit of ["TB", "GB", "MB"] as const) {
+    if (bytes % QUOTA_UNIT[unit] === 0)
+      return { quota_amount: String(bytes / QUOTA_UNIT[unit]), quota_unit: unit };
+  }
+  const text = (bytes / QUOTA_UNIT.MB).toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  return { quota_amount: text, quota_unit: "MB" };
+}
+function quotaBytes(amount: string, unit: QuotaUnit): number {
+  const value = Number(amount);
+  if (!Number.isFinite(value) || value < 0) return Number.NaN;
+  const bytes = value * QUOTA_UNIT[unit];
+  return Number.isSafeInteger(bytes) ? bytes : Number.NaN;
+}
 type UserDraft = {
   name: string;
   email: string;
   password: string;
   enabled: boolean;
-  quota_bytes: string;
+  quota_amount: string;
+  quota_unit: QuotaUnit;
   expires_at: string;
   expires_original: string | null;
   group_ids: number[];
@@ -707,7 +731,8 @@ function UsersPage() {
         email: "",
         password: "",
         enabled: true,
-        quota_bytes: "0",
+        quota_amount: "0",
+        quota_unit: "GB",
         expires_at: "",
         expires_original: null,
         group_ids: [],
@@ -717,7 +742,7 @@ function UsersPage() {
         email: user.email,
         password: "",
         enabled: user.enabled,
-        quota_bytes: String(user.quota_bytes),
+        ...quotaParts(user.quota_bytes),
         expires_at: user.expires_at ? user.expires_at.slice(0, 19) : "",
         expires_original: user.expires_at,
         group_ids: user.group_ids ?? [],
@@ -727,7 +752,7 @@ function UsersPage() {
         email: draft.email.trim(),
         ...(!editing || draft.password ? { password: draft.password } : {}),
         enabled: draft.enabled,
-        quota_bytes: Number(draft.quota_bytes),
+        quota_bytes: quotaBytes(draft.quota_amount, draft.quota_unit),
         expires_at: draft.expires_at
           ? draft.expires_at === draft.expires_original?.slice(0, 19)
             ? draft.expires_original
@@ -735,6 +760,11 @@ function UsersPage() {
           : null,
         group_ids: draft.group_ids,
       })}
+      validate={(draft) =>
+        Number.isSafeInteger(quotaBytes(draft.quota_amount, draft.quota_unit))
+          ? ""
+          : "配额要能换成整数字节。请改数量或单位。"
+      }
       saveBlocked={
         groups.loading || !!groups.error || groups.data === undefined
       }
@@ -828,16 +858,27 @@ function UsersPage() {
               onChange={(event) => update({ password: event.target.value })}
             />
           </Field>
-          <Field label="流量配额（字节）" hint="上传和下载计入总用量。">
+          <Field label="流量配额" hint="0 表示不限。按 MB、GB 或 TB 填写，保存时换成字节。">
             <Input
               type="number"
               min="0"
-              max={Number.MAX_SAFE_INTEGER}
-              step="1"
+              step="any"
               required
-              value={draft.quota_bytes}
-              onChange={(event) => update({ quota_bytes: event.target.value })}
+              value={draft.quota_amount}
+              onChange={(event) => update({ quota_amount: event.target.value })}
             />
+          </Field>
+          <Field label="配额单位">
+            <Select
+              value={draft.quota_unit}
+              onChange={(event) =>
+                update({ quota_unit: event.target.value as QuotaUnit })
+              }
+            >
+              <option value="MB">MB</option>
+              <option value="GB">GB</option>
+              <option value="TB">TB</option>
+            </Select>
           </Field>
           <Field
             label="有效期截止时间（UTC）"
@@ -886,6 +927,7 @@ function NodesPage() {
   const nodes = useResource<Node[]>(`${ROOT}/nodes`);
   const machines = useResource<Machine[]>(`${ROOT}/machines`);
   const groups = useResource<Group[]>(`${ROOT}/groups`);
+  const [configNode, setConfigNode] = useState<Node | null>(null);
   return (
     <div className="mb-custom-section-stack">
     <CrudPage<Node, NodeDraft>
@@ -943,6 +985,16 @@ function NodesPage() {
       consequences={() =>
         "删除将从订阅和机器配置中移除这个节点。连接此节点的客户端需要选择其他可用节点。"
       }
+      runtimeAction={(node) => (
+        <Button
+          variant="ghost"
+          size="small"
+          aria-label={`查看${node.name}的运行配置`}
+          onClick={() => setConfigNode(node)}
+        >
+          配置
+        </Button>
+      )}
       columns={[
         {
           label: "节点 / 端点",
@@ -1130,6 +1182,25 @@ function NodesPage() {
         </>
       )}
     />
+    <Modal
+      open={!!configNode}
+      onClose={() => setConfigNode(null)}
+      title={configNode ? configNode.name : "运行配置"}
+      description="这是已经接入的运行节点。协议、证书和路由由机器上的配置生成，这里只查看，不改成普通节点。"
+      footer={<Button onClick={() => setConfigNode(null)}>关闭</Button>}
+    >
+      {configNode && (
+        <dl className="mb-custom-meta">
+          <div>协议：{configNode.protocol.toUpperCase()}</div>
+          <div>客户端地址：{configNode.host}:{configNode.port}</div>
+          {configNode.server_port ? <div>机器监听：{configNode.server_port}</div> : null}
+          <div>状态：{configNode.enabled ? "启用" : "停用"} · {configNode.online ? "在线" : "离线"}{configNode.show === false ? " · 订阅中隐藏" : ""}</div>
+          <div>接入机器：{configNode.machine_id === null ? "待关联" : (machines.data?.find((machine) => machine.id === configNode.machine_id)?.name ?? `机器 #${configNode.machine_id}`)}</div>
+          {configNode.parent_id ? <div>上级节点：#{configNode.parent_id}</div> : null}
+          <div>访问分组：<GroupNames ids={configNode.group_ids} groups={groups.data} /></div>
+        </dl>
+      )}
+    </Modal>
     </div>
   );
 }

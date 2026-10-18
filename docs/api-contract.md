@@ -3,7 +3,7 @@
 Independent implementation. Bun HTTP + SQLite; browser UI uses relative same-origin URLs. All `/api` replies use `{data: value}`; errors `{error: {code, message}}`, appropriate HTTP status. `/s/:token` is a content download and returns a raw sing-box JSON configuration (no data envelope). Field names snake_case. All byte counters are integer bytes. Times are ISO 8601 UTC strings or null. No Xboard runtime dependencies. A migration tool reads an offline JSON export.
 
 ## Host-separated subscription origin
-Set `MBOARD_PUBLIC_ORIGIN` to the panel origin and `MBOARD_SUBSCRIPTION_ORIGIN` to a distinct subscription origin. The same HTTP listener classifies the actual `Host` header (URL authority fallback when absent). Exact normalized panel/loopback hostnames serve the app; the subscription hostname serves `GET` and `HEAD /s/:64hex-token`. Other routes/methods and unknown hostnames return 404. Domain selection ignores forwarded-host headers. Without a subscription origin the previous single-origin behavior remains available.
+Set `MBOARD_PUBLIC_ORIGIN` to the canonical panel origin and `MBOARD_SUBSCRIPTION_ORIGIN` to a distinct subscription origin. Optional `MBOARD_PANEL_ORIGINS` is a comma-separated list of additional panel origins. The same HTTP listener classifies the actual `Host` header (URL authority fallback when absent). Exact normalized panel/loopback hostnames serve the app; the subscription hostname serves `GET` and `HEAD /s/:64hex-token`. Other routes/methods and unknown hostnames return 404. Domain selection ignores forwarded-host headers. A state-changing browser request must send the Origin configured for that request Host, so one panel hostname cannot submit to another. Without a subscription origin the previous single-origin behavior remains available.
 
 Owner User views include `subscription_url` when an origin is configured. That URL comes from trusted subscription/panel configuration, not request Host. Admin user lists redact token and URL. Subscription responses use `Content-Disposition: attachment; filename="mboard.json"`. Panel-domain subscription paths keep supporting existing links. The reverse proxy passes the original Host to the existing port.
 
@@ -57,7 +57,7 @@ Bearer machine token. Store hashed tokens server-side. Browser sessions are reje
 - `POST .../:name/validate` `{content}` returns `{valid,errors:[{message,line?,column?}],warnings}`.
 - `POST .../:name/preview` `{content}` returns `{template_name,content_type,content,node_count,warnings}` using explicitly synthetic endpoints.
 - Names: `singbox`, `clash`, `clashmeta`, `stash`, `surge`, `surfboard`. Maximum UTF-8 content is 512 KiB.
-- Subscription `format`, `target` and legacy `flag` choose explicit formats. Otherwise actual client UA selects the format, including `clash.meta`.
+- Subscription `format`, `target` and legacy `flag` choose explicit formats. Otherwise actual client UA selects the format, including `clash.meta`. Shadowrocket, Quantumult X and Loon are generated share-link bodies (`flag=shadowrocket|quanx|loon`), not stored templates.
 - Original imported token links remain subscription-only compatibility paths until owner rotation. Administrative APIs keep their separate session/role gates.
 
 ## Restored machine runtime

@@ -251,4 +251,27 @@ const data = async (response: Response) => (await response.json() as any).data;
     // above separately covers proxies/adapters where the URL authority differs.
     for (const request of observed) expect(new URL(request.url).host).toBe(new URL(`http://${request.host}`).host);
   });
+
+  test('an extra panel origin serves the panel and only accepts its own mutation origin', async () => {
+    const extra = 'https://panelb.example';
+    const extraHost = 'panelb.example';
+    const f = fixture({ panelOrigins: [extra] });
+    expect((await f.request('/', { host: extraHost })).status).toBe(200);
+    expect((await f.request('/', { host: 'PaNeLb.example:443' })).status).toBe(200);
+    expect((await data(await f.request('/api/v1/me', { host: extraHost, cookie: f.owner }))).subscription_url).toBe(`${sub}/s/${userToken}`);
+    expect((await f.request(`/s/${userToken}`, { host: extraHost })).status).toBe(200);
+    expect((await f.request('/api/node/v1/config', { host: extraHost, headers: { authorization: `Bearer ${machineToken}` } })).status).toBe(200);
+    const mutation = { host: extraHost, method: 'POST', cookie: f.admin, body: '{"name":"panel b group"}', headers: { origin: extra, 'content-type': 'application/json' } };
+    expect((await f.request('/api/v1/admin/groups', mutation)).status).toBe(201);
+    expect((await f.request('/api/v1/admin/groups', { ...mutation, headers: { origin: panel, 'content-type': 'application/json' } })).status).toBe(403);
+    expect((await f.request('/api/v1/admin/groups', { method: 'POST', cookie: f.admin, body: '{"name":"canonical group"}', headers: { origin: extra, 'content-type': 'application/json' } })).status).toBe(403);
+    expect((await f.request('/', { host: subHost })).status).toBe(404);
+    const dir = directory();
+    expect(() => createApp({ dbPath: join(dir, 'same-host.sqlite'), publicOrigin: panel, subscriptionOrigin: sub, panelOrigins: [panel] })).toThrow('different hostnames');
+    expect(() => createApp({ dbPath: join(dir, 'sub-host.sqlite'), publicOrigin: panel, subscriptionOrigin: sub, panelOrigins: [sub] })).toThrow('different hostname');
+    expect(() => createApp({ dbPath: join(dir, 'missing-public.sqlite'), panelOrigins: [extra] })).toThrow('requires MBOARD_PUBLIC_ORIGIN');
+    expect(existsSync(join(dir, 'same-host.sqlite'))).toBe(false);
+    expect(() => startServer({ MBOARD_HOST: '127.0.0.1', MBOARD_PORT: '8791', MBOARD_DATA_DIR: join(dir, 'empty-extra'), MBOARD_PUBLIC_ORIGIN: panel, MBOARD_SUBSCRIPTION_ORIGIN: sub, MBOARD_PANEL_ORIGINS: `${extra},` })).toThrow('empty origin');
+    expect(existsSync(join(dir, 'empty-extra'))).toBe(false);
+  });
 });

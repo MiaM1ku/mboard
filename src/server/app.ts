@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, RuntimeCompileError } from './runtime';
 import { initializeTrafficReports, getReportSettings, saveReportSettings, buildPreview as buildTrafficReportPreview, enqueueReport, listReportRuns, recordReportTraffic, ReportError } from './traffic-reports';
-import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, selectSubscriptionFormat, TemplateValidationError, type SubscriptionEndpoint } from './subscriptions';
+import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, renderShareLinks, selectSubscriptionFormat, TemplateValidationError, type SubscriptionEndpoint } from './subscriptions';
 
 // Parse an authority, not a URL: URL parsers silently repair several invalid Host values.
 function hostName(authority: string): string | undefined {
@@ -35,7 +35,7 @@ function configuredOrigin(value: string, label: string): string {
 }
 
 type Row = Record<string, any>;
-export interface AppOptions { dbPath?: string; distDir?: string; now?: () => Date; sessionSeconds?: number; loginLimit?: number; peerLoginLimit?: number; trustProxy?: boolean; initializeRuntime?: boolean; publicOrigin?: string; subscriptionOrigin?: string }
+export interface AppOptions { dbPath?: string; distDir?: string; now?: () => Date; sessionSeconds?: number; loginLimit?: number; peerLoginLimit?: number; trustProxy?: boolean; initializeRuntime?: boolean; publicOrigin?: string; subscriptionOrigin?: string; panelOrigins?: string[] }
 class ApiError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 function fail(status: number, code: string, message: string): never { throw new ApiError(status, code, message); }
 const string = (v: unknown, label: string, max = 200, min = 1): string => {
@@ -62,18 +62,26 @@ const pick = (body: Row, fields: string[]) => { for (const k of Object.keys(body
 export function createApp(options: AppOptions = {}) {
   const publicOrigin = options.publicOrigin === undefined ? undefined : configuredOrigin(options.publicOrigin, 'MBOARD_PUBLIC_ORIGIN');
   const subscriptionOrigin = options.subscriptionOrigin === undefined ? undefined : configuredOrigin(options.subscriptionOrigin, 'MBOARD_SUBSCRIPTION_ORIGIN');
-  const panelHost = publicOrigin && hostName(new URL(publicOrigin).host);
+  const extraPanelOrigins = (options.panelOrigins ?? []).map(value => configuredOrigin(value, 'MBOARD_PANEL_ORIGINS'));
+  if (extraPanelOrigins.length && !publicOrigin) throw new Error('MBOARD_PANEL_ORIGINS requires MBOARD_PUBLIC_ORIGIN');
+  const panelOrigins = publicOrigin ? [publicOrigin, ...extraPanelOrigins] : [];
+  const panelHosts = panelOrigins.map(origin => hostName(new URL(origin).host)!);
+  if (new Set(panelHosts).size !== panelHosts.length) throw new Error('Panel origins must use different hostnames');
   const subscriptionHost = subscriptionOrigin && hostName(new URL(subscriptionOrigin).host);
   if (subscriptionOrigin && !publicOrigin) throw new Error('MBOARD_SUBSCRIPTION_ORIGIN requires MBOARD_PUBLIC_ORIGIN');
-  if (subscriptionHost && subscriptionHost === panelHost) throw new Error('MBOARD_SUBSCRIPTION_ORIGIN must have a different hostname from MBOARD_PUBLIC_ORIGIN');
+  if (subscriptionHost && panelHosts.includes(subscriptionHost)) throw new Error('MBOARD_SUBSCRIPTION_ORIGIN must have a different hostname from MBOARD_PUBLIC_ORIGIN');
   const subscriptionURL = (token: string) => (subscriptionOrigin ?? publicOrigin) ? `${subscriptionOrigin ?? publicOrigin}/s/${token}` : undefined;
+  const panelOriginFor = (req: Request) => {
+    const host = hostName(req.headers.get('host') ?? new URL(req.url).host);
+    return (host && panelOrigins.find(origin => hostName(new URL(origin).host) === host)) || publicOrigin;
+  };
   const hostBoundary = (req: Request) => {
     if (!subscriptionHost) return;
     const url = new URL(req.url);
     const host = hostName(req.headers.get('host') ?? url.host);
     if (host === subscriptionHost) {
       if (['GET', 'HEAD'].includes(req.method.toUpperCase()) && (/^\/s\/(?:[a-f0-9]{64}|[A-Za-z0-9_-]{32})$/.test(url.pathname) || (url.pathname==='/api/v1/client/subscribe'&&/^[A-Za-z0-9_-]{32}$/.test(url.searchParams.get('token')||'')))) return;
-    } else if (host && (host === panelHost || ['localhost', '127.0.0.1', '[::1]'].includes(host))) return;
+    } else if (host && (panelHosts.includes(host) || ['localhost', '127.0.0.1', '[::1]'].includes(host))) return;
     fail(404, 'NOT_FOUND', '此地址提供订阅下载，请使用有效的订阅链接');
   };
   const accountLimit = options.loginLimit ?? 10, peerLimit = options.peerLoginLimit ?? 200;
@@ -113,7 +121,7 @@ export function createApp(options: AppOptions = {}) {
   const runtimeMachines=()=>runtimeMachineViews(db).map(m=>{let revision=0;try{revision=compileMachine(db,m.id).revision}catch{}return {...m,config_revision:revision,online:m.active&&m.core_ready&&m.telemetry_ready&&revision>0&&m.applied_revision===revision&&Boolean(m.last_seen_at)&&now().getTime()-Date.parse(m.last_seen_at!)<90000}});
   const runtimeNodes=()=>{const machines=runtimeMachines();return runtimeNodeViews(db).map(n=>{const ready=n.machine_ids.some(mid=>machines.some(m=>m.id===mid&&m.online));return {...n,active:ready,machine_id:n.machine_ids[0]||null,group_ids:n.group_ids.map(Number),tls:n.protocol!=='shadowsocks',server_name:'',created_at:'',online:ready&&n.enabled}})};
   const userNodes=(u:Row)=>[...authorizedNodes(u).map(nodeView),...runtimeNodes().filter(n=>n.active&&n.enabled&&n.show&&active(u)&&n.group_ids.some(g=>groupsFor('user',u.id).includes(g)))];
-  const sessionCookie = (req: Request, token: string, age: number) => `mboard_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${new URL(publicOrigin ?? req.url).protocol === 'https:' ? '; Secure' : ''}`;
+  const sessionCookie = (req: Request, token: string, age: number) => `mboard_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${new URL(panelOriginFor(req) ?? req.url).protocol === 'https:' ? '; Secure' : ''}`;
   const sessionSeconds = options.sessionSeconds ?? 604800;
   const newSession = (req: Request, uid: number) => {
     const token = secret();
@@ -183,12 +191,28 @@ export function createApp(options: AppOptions = {}) {
   }
   function renderedSubscription(u: Row, req: Request) {
     const name=selectSubscriptionFormat(req.headers.get('user-agent'),new URL(req.url).searchParams);
-    const template=getTemplate(db,name);
-    if (!template) fail(503,'TEMPLATE_READY','请刷新模板配置后更新订阅');
     const site=settings();const link=subscriptionURL(u.subscription_token)||`${new URL(req.url).origin}/s/${u.subscription_token}`;
     const clean=(s:unknown)=>String(s).replace(/[\r\n\x00-\x1f]/g,' ').replaceAll(',','，');
-    const info=`title=${clean(site.site_name)}订阅信息, content=上传流量：${u.upload_bytes} B\\n下载流量：${u.download_bytes} B\\n流量额度：${u.quota_bytes?`${u.quota_bytes} B`:'按实际用量累计'}\\n到期时间：${u.expires_at||'长期有效'}`;
-    return renderSubscription(template,subscriptionEndpoints(u),{userAgent:req.headers.get('user-agent')||undefined,metadata:{app_name:clean(site.site_name),subs_link:link,subs_domain:new URL(link).host,subscribe_info:info}});
+    const info=`title=${clean(site.site_name)}订阅信息, content=上传流量：${formatTraffic(u.upload_bytes)}\\n下载流量：${formatTraffic(u.download_bytes)}\\n流量额度：${Number(u.quota_bytes)>0?formatTraffic(u.quota_bytes):'不限'}\\n到期时间：${u.expires_at?clean(u.expires_at):'长期有效'}`;
+    const options={userAgent:req.headers.get('user-agent')||undefined,metadata:{app_name:clean(site.site_name),subs_link:link,subs_domain:new URL(link).host,subscribe_info:info,upload_bytes:Number(u.upload_bytes)||0,download_bytes:Number(u.download_bytes)||0,quota_bytes:Number(u.quota_bytes)||0,expires_at:u.expires_at?String(u.expires_at):null}};
+    if(name==='shadowrocket'||name==='quantumultx'||name==='loon')return renderShareLinks(name,subscriptionEndpoints(u),options);
+    const template=getTemplate(db,name);
+    if (!template) fail(503,'TEMPLATE_READY','请刷新模板配置后更新订阅');
+    return renderSubscription(template,subscriptionEndpoints(u),options);
+  }
+  function formatTraffic(value: unknown): string {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let size = n, index = 0;
+    while (size >= 1024 && index < units.length - 1) { size /= 1024; index++; }
+    const rounded = index === 0 ? String(Math.round(size)) : String(Math.round(size * 100) / 100);
+    return `${rounded} ${units[index]}`;
+  }
+  function subscriptionUserinfo(u: Row): string {
+    const bytes = (value: unknown) => { const n = Number(value); return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0; };
+    const expireAt = u.expires_at ? Math.floor(Date.parse(String(u.expires_at)) / 1000) : 0;
+    return `upload=${bytes(u.upload_bytes)}; download=${bytes(u.download_bytes)}; total=${bytes(u.quota_bytes)}; expire=${Number.isFinite(expireAt) && expireAt > 0 ? expireAt : 0}`;
   }
   function previewEndpoints(): SubscriptionEndpoint[] {
     return [
@@ -216,7 +240,7 @@ export function createApp(options: AppOptions = {}) {
     const nodePath = path.startsWith('/api/node/');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !nodePath) {
       const origin = req.headers.get('origin');
-      if (origin !== (publicOrigin ?? url.origin) || req.headers.get('sec-fetch-site') === 'cross-site') fail(403, 'ORIGIN', '请从本面板页面提交操作');
+      if (origin !== (panelOriginFor(req) ?? url.origin) || req.headers.get('sec-fetch-site') === 'cross-site') fail(403, 'ORIGIN', '请从本面板页面提交操作');
     }
     if (nodePath) {
       if (req.headers.get('cookie')?.includes('mboard_session=')) fail(401, 'NODE_AUTH', '请使用机器令牌连接');
@@ -359,6 +383,8 @@ export function createApp(options: AppOptions = {}) {
         'Content-Type': rendered.content_type,
         'Content-Length': String(new TextEncoder().encode(config).byteLength),
         'Content-Disposition': `attachment; filename="mboard.${suffix}"`,
+        'subscription-userinfo': subscriptionUserinfo(u),
+        'profile-update-interval': '24',
       } });
     }
     if (!path.startsWith('/api/')) return staticResponse(req, options.distDir);

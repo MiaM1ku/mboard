@@ -341,13 +341,14 @@ test("管理端 CRUD、一次性令牌和站点展示", async ({ page }) => {
   await page.getByRole("button", { name: "编辑验收账户", exact: true }).click();
   await page
     .getByRole("dialog")
-    .getByLabel("流量配额（字节）")
-    .fill("1000000000");
+    .getByLabel("流量配额")
+    .fill("1");
+  await page.getByRole("dialog").getByLabel("配额单位").selectOption("GB");
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "保存更改" })
     .click();
-  await expect(page.getByRole("cell", { name: /953.67 MB/ })).toBeVisible();
+  await expect(page.getByRole("cell", { name: /1 GB/ })).toBeVisible();
   await page.goto("/#/admin/machines");
   await page
     .getByRole("button", { name: "创建机器", exact: true })

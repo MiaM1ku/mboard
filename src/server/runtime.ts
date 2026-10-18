@@ -149,7 +149,7 @@ export function heartbeatRuntimeMachine(db: Database, machineID: number, body: {
   return {revision:current,applied_revision:applied ?? null,ready:matching&&body.core_ready===true&&body.telemetry_ready===true};
 }
 export function runtimeMachineViews(db: Database) { return (db.query('SELECT id,state,active,applied_revision,last_seen_at,version,core_ready,telemetry_ready,payload FROM runtime_machines ORDER BY id').all() as Row[]).map(m=>{const p=obj(m.payload);return {id:m.id,name:p.name||`Machine ${m.id}`,host:p.host||p.address||'',enabled:m.state!=='disabled',runtime:true,state:m.state,active:!!m.active,last_seen_at:m.last_seen_at,version:m.version,applied_revision:m.applied_revision,core_ready:!!m.core_ready,telemetry_ready:!!m.telemetry_ready};}); }
-export function runtimeNodeViews(db: Database) { const ms=runtimeMachineViews(db);const bindings=db.query('SELECT machine_id,node_id FROM runtime_bindings').all() as Row[];const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));return all.map(n=>{const root=rootFor(ns,n);const machine_ids=[...new Set(bindings.filter(b=>Number(b.node_id)===Number(root.id)||Number(b.node_id)===Number(n.id)).map(b=>Number(b.machine_id)))];const active=machine_ids.some(id=>ms.some(m=>m.id===id&&m.active&&m.core_ready&&m.telemetry_ready));return {id:Number(n.id),name:n.name,host:n.host,port:Number(n.port),server_port:Number(root.server_port||root.port),protocol:root.type||root.protocol,parent_id:Number(n.parent_id)||null,enabled:yes(n.enabled),show:yes(n.show),group_ids:arr(n.group_ids),rate:Number(n.rate ?? 1),rate_time_enable:yes(n.rate_time_enable,false),rate_time_ranges:arr(n.rate_time_ranges),tags:arr(n.tags),sort:Number(n.sort)||0,transfer_enable:Number(n.transfer_enable)||0,machine_ids,active,runtime:true,state:active?'active':'pending'};}); }
+export function runtimeNodeViews(db: Database) { const ms=runtimeMachineViews(db);const bindings=db.query('SELECT machine_id,node_id FROM runtime_bindings').all() as Row[];const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));return all.map(n=>{const root=rootFor(ns,n);const machine_ids=[...new Set(bindings.filter(b=>Number(b.node_id)===Number(root.id)||Number(b.node_id)===Number(n.id)).map(b=>Number(b.machine_id)))];const active=machine_ids.some(id=>ms.some(m=>m.id===id&&m.active&&m.core_ready&&m.telemetry_ready));return {id:Number(n.id),name:n.name,host:n.host,port:Number(n.port),server_port:Number(root.server_port||root.port),protocol:root.type||root.protocol,parent_id:Number(n.parent_id)||null,enabled:yes(n.enabled),show:yes(n.show),group_ids:arr(n.group_ids),rate:Number(n.rate ?? 1),rate_time_enable:yes(n.rate_time_enable,false),rate_time_ranges:arr(n.rate_time_ranges),tags:arr(n.tags),sort:Number(n.sort)||0,transfer_enable:Number(n.transfer_enable)||0,machine_ids,active,runtime:true,state:active?'active':'pending'};}).sort((a,b)=>a.sort-b.sort||a.id-b.id); }
 export function deactivateMachine(db: Database, machineID: number) { db.query("UPDATE runtime_machines SET state='pending',active=0,core_ready=0,telemetry_ready=0 WHERE id=?").run(machineID); }
 
 function tlsFor(root: Row, m: Row, files: RuntimeFile[]): Row | undefined {
@@ -449,17 +449,20 @@ export function authorizedEndpoints(db: Database, userID: number): RuntimeEndpoi
   const u=db.query('SELECT * FROM users WHERE id=?').get(userID) as Row;if(!u)return [];
   const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));const activeRoots=new Set<number>();
   for(const b of db.query("SELECT b.node_id FROM runtime_bindings b JOIN runtime_machines m ON m.id=b.machine_id WHERE m.active=1 AND m.state='active' AND m.core_ready=1 AND m.telemetry_ready=1").all() as Row[]) {const n=ns.get(Number(b.node_id));if(n)activeRoots.add(Number(rootFor(ns,n).id));}
-  const result:RuntimeEndpoint[]=[];
+  const ranked:{endpoint:RuntimeEndpoint;key:[number,number,number,number]}[]=[];
   for(const n of all) {
     const root=rootFor(ns,n);if(!yes(n.show)||!yes(root.enabled)||!eligible(db,u,n)||!activeRoots.has(Number(root.id)))continue;
     const ps={...obj(root.protocol_settings),...obj(n.protocol_settings)};const protocol=root.type||root.protocol;
-    for(const profile of [null,...profiles(db,root).filter(p=>profileAllows(p,n))]) {
+    const exits=[null,...profiles(db,root).filter(p=>profileAllows(p,n)).sort((a,b)=>(Number(a.sort)||0)-(Number(b.sort)||0)||Number(a.id)-Number(b.id))];
+    for(const profile of exits) {
       const pid=profile?profileID(profile):'';const cred=identity(db,u,n,pid);const credential=protocol==='shadowsocks'?`${shadowsocksServerPSK(root,ps.cipher||ps.method)}:${ssUserPSK(cred,ps.cipher||ps.method)}`:cred;
       const safe=clientSettings(ps,protocol,{...root,...n});
-      result.push({id:profile?`${n.id}:p:${pid}`:Number(n.id),name:profile?`${n.name} · ${profile.name}`:n.name,protocol,host:String(n.host),port:port(n.port,`node ${n.id}`),credential,settings:safe});
+      const profileName=profile?String(profile.name||'').trim():'';
+      ranked.push({endpoint:{id:profile?`${n.id}:p:${pid}`:Number(n.id),name:profileName||n.name,protocol,host:String(n.host),port:port(n.port,`node ${n.id}`),credential,settings:safe},key:[Number(n.sort)||0,Number(n.id),profile?Number(profile.sort)||0:-1,profile?Number(profile.id)||0:0]});
     }
   }
-  return result;
+  ranked.sort((a,b)=>{for(let i=0;i<4;i++)if(a.key[i]!==b.key[i])return a.key[i]-b.key[i];return 0;});
+  return ranked.map(item=>item.endpoint);
 }
 /** Write a private per-machine deployment bundle. Never use this result in public API responses. */
 export function writePrivateMachineBundle(compiled: CompiledMachine, path: string) {

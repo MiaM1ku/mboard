@@ -53,7 +53,7 @@ describe('independent runtime restoration',()=>{
     expect(c.config.outbounds[1].tag).toBe('n10:exit');expect(c.config.inbounds[0].users).toHaveLength(3);
     const expected=deriveUUID(deriveUUID(oldUUID,'xboard-route-profile:v1:profile-4'),'xboard-child-node:v1:11');expect(c.config.inbounds[0].users[2].uuid).toBe(expected);
     expect(c.config.route.rules.find((r:any)=>r.auth_user)).toMatchObject({auth_user:['mb:u:1:n:11:p:profile-4'],outbound:'n10:exit'});
-    const ep=authorizedEndpoints(db,1);expect(ep).toHaveLength(3);expect(ep[2]!.credential).toBe(expected);expect(ep[0]!.settings.tls.reality.private_key).toBeUndefined();expect(ep[0]!.settings.tls.reality.public_key).toBe('public');expect(ep[0]!.settings.reality_settings).toBeUndefined();
+    const ep=authorizedEndpoints(db,1);expect(ep).toHaveLength(3);expect(ep[2]!.credential).toBe(expected);expect(ep[2]!.name).toBe('Exit');expect(ep[0]!.settings.tls.reality.private_key).toBeUndefined();expect(ep[0]!.settings.tls.reality.public_key).toBe('public');expect(ep[0]!.settings.reality_settings).toBeUndefined();
     restoreRuntime(db);expect(compileMachine(db,2).revision).toBe(c.revision);db.close();
   });
   test.each(['vless','trojan','anytls'])('%s client credential matches native server auth',(type)=>{

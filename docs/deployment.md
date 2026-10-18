@@ -10,6 +10,7 @@ SQLite 数据库  /opt/mboard/data/mboard.sqlite
 服务           mboard.service
 监听           http://127.0.0.1:8791
 公开 Origin    https://panel.example
+附加面板       https://panelb.example
 订阅 Origin    https://panelapifkgfw.example
 节点源码       /opt/mboard-node
 ```
@@ -30,7 +31,7 @@ location / {
 }
 ```
 
-浏览器入口使用 HTTPS。两个域名共用 `127.0.0.1:8791` 上游，反代用 `proxy_set_header Host $host` 传入原始域名。面板域名提供页面、管理 API 和节点 API，订阅域名提供 `GET` 和 `HEAD /s/:token`。应用在路由前完成 Host 分流，其他订阅域名请求返回 404。
+浏览器入口使用 HTTPS。这些域名共用 `127.0.0.1:8791` 上游，反代用 `proxy_set_header Host $host` 传入原始域名。`panel.example` 和 `MBOARD_PANEL_ORIGINS` 里的附加面板域名都提供页面、管理 API 和节点 API。提交操作时，浏览器 Origin 必须和当前访问的那个面板域名一致。订阅域名只提供 `GET` 和 `HEAD /s/:token`。应用在路由前完成 Host 分流，其他主机名返回 404。订阅链接仍由 `MBOARD_SUBSCRIPTION_ORIGIN` 生成。
 
 Bun 按固定的 `MBOARD_PUBLIC_ORIGIN` 校验面板操作来源，设置 HttpOnly、SameSite=Strict、Secure 会话 Cookie。复制链接、账号展示和配置下载使用服务端生成的订阅域名 URL。配置下载带附件响应头，支持跨域保存。
 
@@ -41,6 +42,7 @@ MBOARD_HOST=127.0.0.1
 MBOARD_PORT=8791
 MBOARD_DATA_DIR=/opt/mboard/data
 MBOARD_PUBLIC_ORIGIN=https://panel.example
+MBOARD_PANEL_ORIGINS=https://panelb.example
 MBOARD_SUBSCRIPTION_ORIGIN=https://panelapifkgfw.example
 MBOARD_LOGIN_LIMIT=10
 MBOARD_PEER_LOGIN_LIMIT=200
