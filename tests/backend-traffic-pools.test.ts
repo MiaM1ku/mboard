@@ -30,7 +30,6 @@ function fixture() {
   db.query('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?)').run(13, null, 'vless', 1, 1, JSON.stringify({ id: 13, name: 'Other group', parent_id: 0, host: 'other.example.test', port: 8003, server_port: 8003, type: 'vless', enabled: 1, show: 1, group_ids: [2], created_at: '1700000000' }));
   db.query('INSERT INTO runtime_bindings VALUES(?,?,?)').run(3, 13, '{}');
   db.query('INSERT INTO runtime_bindings VALUES(?,?,?)').run(2, 10, '{}');
-  db.query('INSERT INTO runtime_bindings VALUES(?,?,?)').run(2, 11, '{}');
   db.query('INSERT INTO runtime_bindings VALUES(?,?,?)').run(3, 12, '{}');
   const userCookie = `mboard_session=${'c'.repeat(64)}`, adminCookie = `mboard_session=${'d'.repeat(64)}`;
   async function request(path: string, method = 'GET', data?: unknown, cookie?: string, extra?: HeadersInit) {
@@ -122,11 +121,12 @@ describe('user-facing flow', () => {
     const f = fixture();
     await f.traffic('user-bytes', [f.record({ upload_bytes: 300, download_bytes: 200 })]);
     await f.createPool({ name: 'Tencent IX', members: [{ type: 'node', id: 10 }] });
+    await f.createPool({ name: 'Bage HK pool', members: [{ type: 'machine', id: 2 }] });
     await f.createPool({ name: 'Hidden pool', members: [{ type: 'machine', id: 3 }], visible_to_users: false });
     await f.createPool({ name: 'Unrelated pool', members: [{ type: 'node', id: 13 }], visible_to_users: true });
     const overview = await f.request('/api/v1/overview', 'GET', undefined, f.userCookie);
     expect(overview.status).toBe(200);
-    expect(overview.data.pools.map((item: any) => item.name)).toEqual(['Tencent IX']);
+    expect(overview.data.pools.map((item: any) => item.name)).toEqual(['Tencent IX', 'Bage HK pool']);
     expect(overview.data.pools[0]).toMatchObject({ kind: 'entry', status: 'ok' });
     expect(JSON.stringify(overview.data.pools)).not.toContain('quota_bytes');
     expect(JSON.stringify(overview.data.pools)).not.toContain('used_bytes');

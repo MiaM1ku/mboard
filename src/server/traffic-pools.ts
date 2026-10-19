@@ -287,11 +287,9 @@ export function userTrafficTotals(db: Database, start: string, end: string, limi
 }
 /** Pools a user can see: those covering any of their available nodes. Bytes stay private. */
 export function userPoolStatus(db: Database, nodeIDs: number[], now: Date) {
+  // Child entries inherit the root machine binding, so a machine-wide pool covers them too.
   const machinesOf = new Map<number, Set<number>>();
-  for (const binding of rows(db, 'SELECT node_id,machine_id FROM runtime_bindings')) {
-    const node = Number(binding.node_id), machine = Number(binding.machine_id);
-    const set = machinesOf.get(node) ?? new Set<number>(); set.add(machine); machinesOf.set(node, set);
-  }
+  for (const node of runtimeNodeViews(db)) machinesOf.set(node.id, new Set(node.machine_ids.map(Number)));
   const visibleNodes = new Set(nodeIDs);
   const visibleMachines = new Set<number>();
   for (const node of visibleNodes) for (const machine of machinesOf.get(node) ?? []) visibleMachines.add(machine);
