@@ -922,12 +922,21 @@ type NodeDraft = {
   group_ids: number[];
   tls: boolean;
   server_name: string;
+  entry_ips: string[];
 };
 function NodesPage() {
   const nodes = useResource<Node[]>(`${ROOT}/nodes`);
   const machines = useResource<Machine[]>(`${ROOT}/machines`);
   const groups = useResource<Group[]>(`${ROOT}/groups`);
+  const { notify } = useToast();
   const [configNode, setConfigNode] = useState<Node | null>(null);
+  const [entryDraft, setEntryDraft] = useState<string[]>([]);
+  const [entryBusy, setEntryBusy] = useState(false);
+  const [entryError, setEntryError] = useState("");
+  useEffect(() => {
+    setEntryDraft([...(configNode?.entry_ips ?? [])]);
+    setEntryError("");
+  }, [configNode]);
   return (
     <div className="mb-custom-section-stack">
     <CrudPage<Node, NodeDraft>
@@ -948,6 +957,7 @@ function NodesPage() {
         group_ids: [],
         tls: true,
         server_name: "",
+        entry_ips: [],
       })}
       editDraft={(node) => ({
         name: node.name,
@@ -959,6 +969,7 @@ function NodesPage() {
         group_ids: node.group_ids,
         tls: node.tls,
         server_name: node.server_name,
+        entry_ips: [...(node.entry_ips ?? [])],
       })}
       payload={(draft) => ({
         name: draft.name.trim(),
@@ -970,10 +981,14 @@ function NodesPage() {
         group_ids: draft.group_ids,
         tls: draft.tls,
         server_name: draft.server_name.trim(),
+        entry_ips: draft.entry_ips.map((ip) => ip.trim()).filter(Boolean),
       })}
-      validate={(draft) =>
-        draft.group_ids.length ? "" : "选择至少一个访问分组，再保存节点。"
-      }
+      validate={(draft) => {
+        if (!draft.group_ids.length) return "选择至少一个访问分组，再保存节点。";
+        const ips = draft.entry_ips.map((ip) => ip.trim()).filter(Boolean);
+        if (ips.length === 1) return "负载均衡入口至少填写两个 IP，或留空。";
+        return "";
+      }}
       saveBlocked={
         groups.loading ||
         !!groups.error ||
@@ -1002,7 +1017,7 @@ function NodesPage() {
             <>
               <strong>{node.name}</strong>
               <div className="mb-custom-meta mono">
-                #{node.id} · {node.host}:{node.port}
+                #{node.id} · {(node.entry_ips?.length ?? 0) >= 2 ? node.entry_ips!.join(" / ") : `${node.host}:${node.port}`}
               </div>
             </>
           ),
@@ -1053,7 +1068,32 @@ function NodesPage() {
               onChange={(event) => update({ name: event.target.value })}
             />
           </Field>
-          <Field label="服务地址" hint="填写客户端可访问的域名或 IP 地址。">
+          <div className="mb-custom-field-wide">
+            <Field label="负载均衡入口" hint="直接填写两个及以上 IP。支持负载均衡的客户端会合成一个入口，其他客户端会看到多个节点。留空则使用服务地址。">
+              <div className="mb-custom-section-stack">
+                {draft.entry_ips.map((ip, index) => (
+                  <div className="mb-custom-actions" key={index}>
+                    <Input
+                      value={ip}
+                      maxLength={45}
+                      placeholder="192.0.2.1"
+                      aria-label={`入口 IP ${index + 1}`}
+                      onChange={(event) => update({
+                        entry_ips: draft.entry_ips.map((current, currentIndex) => currentIndex === index ? event.target.value : current),
+                      })}
+                    />
+                    <Button variant="ghost" onClick={() => update({ entry_ips: draft.entry_ips.filter((_, currentIndex) => currentIndex !== index) })}>
+                      移除
+                    </Button>
+                  </div>
+                ))}
+                <Button variant="secondary" onClick={() => update({ entry_ips: [...draft.entry_ips, ""] })}>
+                  添加入口
+                </Button>
+              </div>
+            </Field>
+          </div>
+          <Field label="服务地址" hint="填写客户端可访问的域名或 IP 地址。填写了负载均衡入口后，订阅不再使用这个域名。">
             <Input
               required
               maxLength={253}
@@ -1187,12 +1227,60 @@ function NodesPage() {
       onClose={() => setConfigNode(null)}
       title={configNode ? configNode.name : "运行配置"}
       description="这是已经接入的运行节点。协议、证书和路由由机器上的配置生成，这里只查看，不改成普通节点。"
-      footer={<Button onClick={() => setConfigNode(null)}>关闭</Button>}
+      footer={
+        <>
+          <Button variant="secondary" disabled={entryBusy} onClick={() => setConfigNode(null)}>关闭</Button>
+          <Button
+            loading={entryBusy}
+            disabled={entryBusy}
+            onClick={async () => {
+              if (!configNode) return;
+              const entry_ips = entryDraft.map((ip) => ip.trim()).filter(Boolean);
+              if (entry_ips.length === 1) { setEntryError("负载均衡入口至少填写两个 IP，或留空。"); return; }
+              setEntryBusy(true); setEntryError("");
+              try {
+                await api(`${ROOT}/runtime-nodes/${configNode.id}/entries`, request("PATCH", { entry_ips }));
+                nodes.reload();
+                notify("节点入口已保存", "success");
+                setConfigNode(null);
+              } catch (error) {
+                setEntryError(errorText(error));
+              } finally {
+                setEntryBusy(false);
+              }
+            }}
+          >
+            保存入口
+          </Button>
+        </>
+      }
     >
       {configNode && (
         <dl className="mb-custom-meta">
           <div>协议：{configNode.protocol.toUpperCase()}</div>
           <div>客户端地址：{configNode.host}:{configNode.port}</div>
+          <Field label="负载均衡入口" hint="直接填写两个及以上 IP。支持负载均衡的客户端会合成一个入口，其他客户端会看到多个节点。">
+            <div className="mb-custom-section-stack">
+              {entryDraft.map((ip, index) => (
+                <div className="mb-custom-actions" key={index}>
+                  <Input
+                    value={ip}
+                    maxLength={45}
+                    placeholder="192.0.2.1"
+                    aria-label={`运行节点入口 IP ${index + 1}`}
+                    onChange={(event) => setEntryDraft((current) => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}
+                  />
+                  <Button variant="ghost" disabled={entryBusy} onClick={() => setEntryDraft((current) => current.filter((_, itemIndex) => itemIndex !== index))}>
+                    移除
+                  </Button>
+                </div>
+              ))}
+              <Button variant="secondary" disabled={entryBusy} onClick={() => setEntryDraft((current) => [...current, ""])}>
+                添加入口
+              </Button>
+            </div>
+          </Field>
+          {entryError && <ErrorState message={entryError} />}
           {configNode.server_port ? <div>机器监听：{configNode.server_port}</div> : null}
           <div>状态：{configNode.enabled ? "启用" : "停用"} · {configNode.online ? "在线" : "离线"}{configNode.show === false ? " · 订阅中隐藏" : ""}</div>
           <div>接入机器：{configNode.machine_id === null ? "待关联" : (machines.data?.find((machine) => machine.id === configNode.machine_id)?.name ?? `机器 #${configNode.machine_id}`)}</div>
@@ -1945,6 +2033,7 @@ const auditAction: Record<string, string> = {
   "guides.update": "更新指南",
   "guides.delete": "删除指南",
   "settings.update": "更新站点设置",
+  "runtime-nodes.entries": "更新节点入口",
   "password.change": "更新密码",
   "subscription.rotate": "轮换订阅凭据",
   "ticket.create": "提交问题",

@@ -28,6 +28,7 @@ export interface Node {
   group_ids: number[];
   tls: boolean;
   server_name: string;
+  entry_ips?: string[];
   online: boolean;
   created_at: string;
   runtime?: boolean;

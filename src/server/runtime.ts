@@ -9,12 +9,13 @@ export type RestoreRuntimeOptions = { supplements?: RuntimeSupplement[]; coreVer
 export type TrafficLabel = { label: string; user_id: number; node_id: number };
 export type RuntimeFile = { path_under_mboard_tls: string; content: string; mode: number };
 export type CompiledMachine = { revision: number; config: Row; traffic_labels: TrafficLabel[]; files: RuntimeFile[]; warnings: string[] };
-export type RuntimeEndpoint = { id: number | string; name: string; protocol: string; host: string; port: number; credential: string; settings: Row; native_outbounds?: Row[] };
+export type RuntimeEndpoint = { id: number | string; name: string; protocol: string; host: string; port: number; credential: string; settings: Row; native_outbounds?: Row[]; entry_ips?: string[] };
 export class RuntimeCompileError extends Error { constructor(public code: string, public entity: string) { super(`Runtime ${code}: ${entity}`); this.name = 'RuntimeCompileError'; } }
 function fail(code: string, entity: string): never { throw new RuntimeCompileError(code, entity); }
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const json = (s: any, fallback: any = {}) => { if (s == null || s === '') return fallback; if (typeof s !== 'string') return s; try { return JSON.parse(s); } catch { return fail('invalid-json', 'source field'); } };
 const arr = (s: any): any[] => { const v = json(s, []); return Array.isArray(v) ? v : fail('expected-array', 'source field'); };
+const storedEntryIPs = (value: unknown): string[] => Array.isArray(value) ? value.filter((ip): ip is string => typeof ip === 'string') : [];
 const obj = (s: any): Row => { const v = json(s, {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : fail('expected-object-or-decrypted-supplement', 'source field'); };
 const yes = (s: any, defaultValue = true) => s == null ? defaultValue : ![false, 0, '0', 'false'].includes(s);
 const id = (s: any, entity: string) => Number.isSafeInteger(Number(s)) && Number(s) > 0 ? Number(s) : fail('invalid-id', entity);
@@ -149,7 +150,14 @@ export function heartbeatRuntimeMachine(db: Database, machineID: number, body: {
   return {revision:current,applied_revision:applied ?? null,ready:matching&&body.core_ready===true&&body.telemetry_ready===true};
 }
 export function runtimeMachineViews(db: Database) { return (db.query('SELECT id,state,active,applied_revision,last_seen_at,version,core_ready,telemetry_ready,payload FROM runtime_machines ORDER BY id').all() as Row[]).map(m=>{const p=obj(m.payload);return {id:m.id,name:p.name||`Machine ${m.id}`,host:p.host||p.address||'',enabled:m.state!=='disabled',runtime:true,state:m.state,active:!!m.active,last_seen_at:m.last_seen_at,version:m.version,applied_revision:m.applied_revision,core_ready:!!m.core_ready,telemetry_ready:!!m.telemetry_ready};}); }
-export function runtimeNodeViews(db: Database) { const ms=runtimeMachineViews(db);const bindings=db.query('SELECT machine_id,node_id FROM runtime_bindings').all() as Row[];const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));return all.map(n=>{const root=rootFor(ns,n);const machine_ids=[...new Set(bindings.filter(b=>Number(b.node_id)===Number(root.id)||Number(b.node_id)===Number(n.id)).map(b=>Number(b.machine_id)))];const active=machine_ids.some(id=>ms.some(m=>m.id===id&&m.active&&m.core_ready&&m.telemetry_ready));return {id:Number(n.id),name:n.name,host:n.host,port:Number(n.port),server_port:Number(root.server_port||root.port),protocol:root.type||root.protocol,parent_id:Number(n.parent_id)||null,enabled:yes(n.enabled),show:yes(n.show),group_ids:arr(n.group_ids),rate:Number(n.rate ?? 1),rate_time_enable:yes(n.rate_time_enable,false),rate_time_ranges:arr(n.rate_time_ranges),tags:arr(n.tags),sort:Number(n.sort)||0,transfer_enable:Number(n.transfer_enable)||0,machine_ids,active,runtime:true,state:active?'active':'pending'};}).sort((a,b)=>a.sort-b.sort||a.id-b.id); }
+export function runtimeNodeViews(db: Database) { const ms=runtimeMachineViews(db);const bindings=db.query('SELECT machine_id,node_id FROM runtime_bindings').all() as Row[];const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));return all.map(n=>{const root=rootFor(ns,n);const machine_ids=[...new Set(bindings.filter(b=>Number(b.node_id)===Number(root.id)||Number(b.node_id)===Number(n.id)).map(b=>Number(b.machine_id)))];const active=machine_ids.some(id=>ms.some(m=>m.id===id&&m.active&&m.core_ready&&m.telemetry_ready));return {id:Number(n.id),name:n.name,host:n.host,port:Number(n.port),server_port:Number(root.server_port||root.port),protocol:root.type||root.protocol,parent_id:Number(n.parent_id)||null,enabled:yes(n.enabled),show:yes(n.show),group_ids:arr(n.group_ids),entry_ips:storedEntryIPs(n.entry_ips),rate:Number(n.rate ?? 1),rate_time_enable:yes(n.rate_time_enable,false),rate_time_ranges:arr(n.rate_time_ranges),tags:arr(n.tags),sort:Number(n.sort)||0,transfer_enable:Number(n.transfer_enable)||0,machine_ids,active,runtime:true,state:active?'active':'pending'};}).sort((a,b)=>a.sort-b.sort||a.id-b.id); }
+export function setRuntimeEntryIPs(db: Database, id: number, ips: string[]): boolean {
+  const row = db.query('SELECT payload FROM runtime_nodes WHERE id=?').get(id) as Row | null;
+  if (!row) return false;
+  const payload = obj(row.payload); payload.entry_ips = ips;
+  db.query('UPDATE runtime_nodes SET payload=? WHERE id=?').run(JSON.stringify(payload), id);
+  return true;
+}
 export function deactivateMachine(db: Database, machineID: number) { db.query("UPDATE runtime_machines SET state='pending',active=0,core_ready=0,telemetry_ready=0 WHERE id=?").run(machineID); }
 
 function tlsFor(root: Row, m: Row, files: RuntimeFile[]): Row | undefined {
@@ -458,7 +466,8 @@ export function authorizedEndpoints(db: Database, userID: number): RuntimeEndpoi
       const pid=profile?profileID(profile):'';const cred=identity(db,u,n,pid);const credential=protocol==='shadowsocks'?`${shadowsocksServerPSK(root,ps.cipher||ps.method)}:${ssUserPSK(cred,ps.cipher||ps.method)}`:cred;
       const safe=clientSettings(ps,protocol,{...root,...n});
       const profileName=profile?String(profile.name||'').trim():'';
-      ranked.push({endpoint:{id:profile?`${n.id}:p:${pid}`:Number(n.id),name:profileName||n.name,protocol,host:String(n.host),port:port(n.port,`node ${n.id}`),credential,settings:safe},key:[Number(n.sort)||0,Number(n.id),profile?Number(profile.sort)||0:-1,profile?Number(profile.id)||0:0]});
+      const entry_ips=storedEntryIPs(n.entry_ips);
+      ranked.push({endpoint:{id:profile?`${n.id}:p:${pid}`:Number(n.id),name:profileName||n.name,protocol,host:String(n.host),port:port(n.port,`node ${n.id}`),credential,settings:safe,...(entry_ips.length?{entry_ips}:{})},key:[Number(n.sort)||0,Number(n.id),profile?Number(profile.sort)||0:-1,profile?Number(profile.id)||0:0]});
     }
   }
   ranked.sort((a,b)=>{for(let i=0;i<4;i++)if(a.key[i]!==b.key[i])return a.key[i]-b.key[i];return 0;});

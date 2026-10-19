@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import { isIP } from 'node:net';
 import { isAlias, isMap, isScalar, isSeq, parseDocument, visit, type Document } from 'yaml';
 
 export const TEMPLATE_NAMES = ['singbox', 'clash', 'clashmeta', 'stash', 'surge', 'surfboard'] as const;
@@ -14,6 +15,8 @@ export interface SubscriptionEndpoint {
   settings?: Record<string, any>;
   /** Optional compiled sing-box chain. Its last element is the public outbound. */
   native_outbounds?: Record<string, any>[];
+  /** Two or more direct IP entry points. Never a hostname. */
+  entry_ips?: string[];
 }
 export interface TemplateIssue { message: string; line?: number; column?: number }
 export interface TemplateValidation { valid: boolean; errors: TemplateIssue[]; warnings: string[] }
@@ -31,6 +34,36 @@ export interface SubscriptionRender {
 export class TemplateValidationError extends Error {
   readonly status = 400;
   constructor(public readonly issues: TemplateIssue[]) { super(issues[0]?.message || '请检查模板内容后重试。'); this.name = 'TemplateValidationError'; }
+}
+export class EntryIPError extends Error {
+  readonly status = 400;
+  constructor(message: string) { super(message); this.name = 'EntryIPError'; }
+}
+const LOAD_BALANCE_FORMATS = new Set<TemplateName>(['clash', 'clashmeta', 'stash']);
+/** Accept only a repeatable list of direct IP addresses. A hostname is not an entry. */
+export function validateEntryIPs(value: unknown): string[] {
+  if (value == null || (Array.isArray(value) && value.length === 0)) return [];
+  if (!Array.isArray(value)) throw new EntryIPError('负载均衡入口需要是 IP 列表');
+  const ips = value.map(item => { if (typeof item !== 'string') throw new EntryIPError('负载均衡入口请填写 IP，不要填写域名'); return item.trim(); });
+  if (ips.some(ip => !ip) || ips.some(ip => isIP(ip) === 0)) throw new EntryIPError('负载均衡入口请填写 IP，不要填写域名');
+  if (ips.length === 1) throw new EntryIPError('负载均衡入口至少填写两个 IP，或留空');
+  if (ips.length > 16) throw new EntryIPError('负载均衡入口最多 16 个 IP');
+  if (new Set(ips).size !== ips.length) throw new EntryIPError('负载均衡入口里的 IP 不能重复');
+  return ips;
+}
+function normalizeEntryIPs(value: unknown): string[] {
+  try { return validateEntryIPs(value); } catch { return []; }
+}
+function presentEndpoints(endpoints: SubscriptionEndpoint[], format: string): SubscriptionEndpoint[] {
+  const balance = LOAD_BALANCE_FORMATS.has(format as TemplateName);
+  const presented: SubscriptionEndpoint[] = [];
+  for (const endpoint of endpoints) {
+    const ips = normalizeEntryIPs(endpoint.entry_ips);
+    if (ips.length < 2) { presented.push({ ...endpoint, entry_ips: undefined }); continue; }
+    if (balance) { presented.push({ ...endpoint, entry_ips: ips }); continue; }
+    ips.forEach((ip, index) => presented.push({ ...endpoint, name: `${endpoint.name} · ${index + 1}`, host: ip, entry_ips: undefined }));
+  }
+  return presented;
 }
 const defaults: Record<TemplateName, string> = {
   singbox: JSON.stringify({ outbounds: [{ type: 'selector', tag: '节点选择', outbounds: ['direct'] }, { type: 'direct', tag: 'direct' }], route: { final: '节点选择' } }, null, 2),
@@ -315,6 +348,7 @@ function singboxOutbound(e: SubscriptionEndpoint): Record<string, any> {
 function yamlOutbound(e: SubscriptionEndpoint): Record<string, any> {
   const s = e.settings || {}, tls = s.tls || {}, p = e.protocol === 'ss' ? 'shadowsocks' : e.protocol;
   const result: Record<string, any> = { name: e.name, type: p === 'shadowsocks' ? 'ss' : p, server: e.host, port: e.port, udp: true };
+  if (e.entry_ips?.length) result.entry_ips = e.entry_ips;
   if (p === 'shadowsocks') { result.cipher = s.method; result.password = e.credential; }
   else if (p === 'vless') { result.uuid = e.credential; if (s.flow) result.flow = s.flow; result.tls = !!tls.enabled; }
   else result.password = e.credential;
@@ -639,13 +673,13 @@ function metadataText(text: string, metadata: RenderOptions['metadata'], keys: s
     return keys.includes(key) && typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ') : marker;
   });
 }
-const TENCENT_IX_HOST = 'tx.example';
-const TENCENT_IX_IPS = ['192.0.2.10', '192.0.2.11'];
 function expandLoadBalance(proxies: Record<string, any>[]): { proxies: Record<string, any>[]; groups: Record<string, any>[] } {
   const next: Record<string, any>[] = [], groups: Record<string, any>[] = [];
   for (const proxy of proxies) {
-    if (proxy.server !== TENCENT_IX_HOST) { next.push(proxy); continue; }
-    const members = TENCENT_IX_IPS.map((ip, index) => ({ ...structuredClone(proxy), name: `${proxy.name} · ${index + 1}`, server: ip, hidden: true }));
+    const ips = normalizeEntryIPs(proxy.entry_ips);
+    delete proxy.entry_ips;
+    if (ips.length < 2) { next.push(proxy); continue; }
+    const members = ips.map((ip, index) => ({ ...structuredClone(proxy), name: `${proxy.name} · ${index + 1}`, server: ip, hidden: true }));
     next.push(...members);
     groups.push({ name: proxy.name, type: 'load-balance', strategy: 'round-robin', url: 'http://cp.cloudflare.com/', interval: 300, lazy: true, proxies: members.map(member => member.name) });
   }
@@ -654,6 +688,7 @@ function expandLoadBalance(proxies: Record<string, any>[]): { proxies: Record<st
 /** Render ONLY caller-authorized endpoints. No DB lookups, executable templates or provider network requests. */
 export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' | 'content'>, endpoints: SubscriptionEndpoint[], options: RenderOptions = {}): SubscriptionRender {
   const name = templateName(template.name), validation = validateTemplate(name, template.content);
+  endpoints = presentEndpoints(endpoints, name);
   if (!validation.valid) throw new TemplateValidationError(validation.errors);
   const warnings: string[] = []; const permitted: SubscriptionEndpoint[] = [];
   const reserved = new Set<string>();
@@ -801,6 +836,7 @@ function shareNetwork(e: SubscriptionEndpoint): ShareNet | null {
 function shareLabel(value: string): string { return value.replace(/[\r\n\0,=]/g, ' ').replace(/\s+/g, ' ').trim(); }
 /** URI subscriptions for clients that cannot import sing-box JSON. Not stored templates. */
 export function renderShareLinks(format: ShareFormat, endpoints: SubscriptionEndpoint[], options: RenderOptions = {}): SubscriptionRender {
+  endpoints = presentEndpoints(endpoints, format);
   const warnings: string[] = []; const lines: string[] = []; let count = 0;
   const build = shareBuild(options);
   const gb = (value: number | undefined) => { const n = Number(value); return Number.isFinite(n) && n > 0 ? String(Math.round(n / 1073741824 * 100) / 100) : '0'; };

@@ -3,9 +3,9 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, extname } from 'node:path';
 import { isIP } from 'node:net';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, RuntimeCompileError } from './runtime';
+import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, setRuntimeEntryIPs, RuntimeCompileError } from './runtime';
 import { initializeTrafficReports, getReportSettings, saveReportSettings, buildPreview as buildTrafficReportPreview, enqueueReport, listReportRuns, recordReportTraffic, ReportError } from './traffic-reports';
-import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, renderShareLinks, selectSubscriptionFormat, TemplateValidationError, type SubscriptionEndpoint } from './subscriptions';
+import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, renderShareLinks, selectSubscriptionFormat, TemplateValidationError, validateEntryIPs, EntryIPError, type SubscriptionEndpoint } from './subscriptions';
 
 // Parse an authority, not a URL: URL parsers silently repair several invalid Host values.
 function hostName(authority: string): string | undefined {
@@ -107,7 +107,8 @@ export function createApp(options: AppOptions = {}) {
   };
   const online = (m: Row | null) => !!m?.enabled && !!m.last_seen_at && now().getTime() - Date.parse(m.last_seen_at) < 90_000;
   const machineView = (m: Row) => ({ id: m.id, name: m.name, host: m.host, enabled: !!m.enabled, last_seen_at: m.last_seen_at, version: m.version, online: online(m), config_revision: m.config_revision });
-  const nodeView = (n: Row) => ({ id: n.id, name: n.name, host: n.host, port: n.port, protocol: n.protocol, enabled: !!n.enabled, machine_id: n.machine_id, group_ids: groupsFor('node', n.id), tls: !!n.tls, server_name: n.server_name, online: !!n.enabled && online(n.machine_id ? get('SELECT * FROM machines WHERE id=?', n.machine_id) : null), created_at: n.created_at });
+  const entryList = (value: unknown) => { try { const parsed = typeof value === 'string' ? JSON.parse(value) : value; return validateEntryIPs(parsed); } catch { return []; } };
+  const nodeView = (n: Row) => ({ id: n.id, name: n.name, host: n.host, port: n.port, protocol: n.protocol, enabled: !!n.enabled, machine_id: n.machine_id, group_ids: groupsFor('node', n.id), tls: !!n.tls, server_name: n.server_name, entry_ips: entryList(n.entry_ips), online: !!n.enabled && online(n.machine_id ? get('SELECT * FROM machines WHERE id=?', n.machine_id) : null), created_at: n.created_at });
   const active = (u: Row) => !!u.enabled && (!u.expires_at || Date.parse(u.expires_at) > now().getTime()) && (!u.quota_bytes || u.upload_bytes + u.download_bytes < u.quota_bytes);
   const granted = (uid: number, nid: number) => !!get('SELECT 1 FROM user_groups ug JOIN node_groups ng ON ug.group_id=ng.group_id WHERE ug.user_id=? AND ng.node_id=? LIMIT 1', uid, nid);
   const authorizedNodes = (u: Row) => active(u) ? all(`SELECT DISTINCT n.* FROM nodes n JOIN node_groups ng ON ng.node_id=n.id JOIN user_groups ug ON ug.group_id=ng.group_id LEFT JOIN machines m ON m.id=n.machine_id WHERE ug.user_id=? AND n.enabled=1 AND (n.machine_id IS NULL OR m.enabled=1) ORDER BY n.id`, u.id) : [];
@@ -186,7 +187,7 @@ export function createApp(options: AppOptions = {}) {
     const healthyNodes=new Set(runtimeNodes().filter(n=>n.online).map(n=>n.id));
     return [...authorizedNodes(u).map(n => {
       const native=outbound(n,u);const {type,tag,server,server_port,uuid,password,...settings}=native;
-      return {id:n.id,name:`node-${n.id}`,protocol:n.protocol,host:n.host,port:n.port,credential:u.credential,settings};
+      return {id:n.id,name:`node-${n.id}`,protocol:n.protocol,host:n.host,port:n.port,credential:u.credential,settings,entry_ips:entryList(n.entry_ips)};
     }),...runtimeEndpoints(db,u.id).filter(e=>healthyNodes.has(Number(String(e.id).split(':')[0])))];
   }
   function renderedSubscription(u: Row, req: Request) {
@@ -490,6 +491,14 @@ export function createApp(options: AppOptions = {}) {
       }
       if (path === '/api/v1/admin/audit' && method === 'GET') return json(all('SELECT * FROM audit ORDER BY id DESC LIMIT 100'));
       if (path === '/api/v1/admin/tickets' && method === 'GET') return json(all('SELECT * FROM tickets ORDER BY id DESC').map(ticketView));
+      const runtimeEntries = path.match(/^\/api\/v1\/admin\/runtime-nodes\/(\d+)\/entries$/);
+      if (runtimeEntries && method === 'PATCH') {
+        const id = integer(Number(runtimeEntries[1]), '记录 ID', 1);
+        const b = await body(req); pick(b, ['entry_ips']);
+        let ips: string[]; try { ips = validateEntryIPs(b.entry_ips); } catch (error) { if (error instanceof EntryIPError) fail(400, 'VALIDATION', error.message); throw error; }
+        if (!setRuntimeEntryIPs(db, id, ips)) fail(404, 'NOT_FOUND', '请检查节点');
+        audit(u, 'runtime-nodes.entries', id); return json({ id, entry_ips: ips });
+      }
       if (path === '/api/v1/admin/settings') {
         if (method === 'GET') return json(settings());
         if (method === 'PATCH') { const b = await body(req); pick(b, ['site_name','site_description']); const entries = Object.entries(b).map(([k,v]) => [k,string(v, k === 'site_name' ? '站点名称' : '站点介绍', k === 'site_name' ? 100 : 2000, k === 'site_name' ? 1 : 0)]); atomic(() => { for (const [k,v] of entries) run('UPDATE settings SET value=? WHERE key=?', v, k); audit(u, 'settings.update', 'site'); }); return json(settings()); }
@@ -524,11 +533,13 @@ export function createApp(options: AppOptions = {}) {
             if (digest) fields.password_hash = digest;
             if (!old) Object.assign(fields,{role:'user',credential:crypto.randomUUID(),subscription_token:secret(),created_at:stamp()});
           } else if (table === 'nodes') {
-            pick(b,['name','host','port','protocol','enabled','machine_id','group_ids','tls','server_name']);
+            pick(b,['name','host','port','protocol','enabled','machine_id','group_ids','tls','server_name','entry_ips']);
             take('name',v => string(v,'节点名称',100)); take('host',endpoint); take('port',v => integer(v,'端口',1,65535)); take('protocol',v => { if (!['vless','trojan','shadowsocks'].includes(v)) fail(400,'VALIDATION','请选择支持的协议'); return v; });
             take('enabled',v => boolean(v,'启用状态'),1); take('machine_id',v => { if (v === null) return null; const mid = integer(v,'机器 ID',1); if (!get('SELECT id FROM machines WHERE id=?',mid)) fail(400,'VALIDATION','请选择已有的机器'); return mid; },null);
             take('tls',v => boolean(v,'TLS 状态'),1); take('server_name',v => v === '' ? '' : endpoint(v),'');
             if (own(b,'group_ids')) gids = validGroups(b.group_ids); else if (!old) gids = [];
+            if (own(b,'entry_ips')) { try { fields.entry_ips = JSON.stringify(validateEntryIPs(b.entry_ips)); } catch (error) { if (error instanceof EntryIPError) fail(400, 'VALIDATION', error.message); throw error; } }
+            else if (!old) fields.entry_ips = '[]';
             const effective = { ...old,...fields };
             if (effective.protocol === 'shadowsocks' && effective.tls) fail(400,'VALIDATION','Shadowsocks 请关闭 TLS，协议本身提供加密');
             if (effective.protocol === 'trojan' && !effective.tls) fail(400,'VALIDATION','Trojan 请开启 TLS 并配置节点证书');

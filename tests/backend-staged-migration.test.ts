@@ -39,7 +39,7 @@ test('v2 schema upgrade keeps existing users and default zero quota semantics', 
   db.exec("DROP TABLE legacy_records; DROP TABLE import_runs; PRAGMA user_version=1");
   db.query('INSERT INTO users(email,name,password_hash,credential,subscription_token,created_at) VALUES(?,?,?,?,?,?)').run('existing@example.com','Existing',digest,'uuid','token','2026-01-01T00:00:00Z');
   db.close(); const upgraded=openDatabase(f.db);
-  try { expect(upgraded.query('PRAGMA user_version').get()).toEqual({user_version:2}); expect(upgraded.query('SELECT email,quota_bytes FROM users').get()).toEqual({email:'existing@example.com',quota_bytes:0}); }
+  try { expect(upgraded.query('PRAGMA user_version').get()).toEqual({user_version:3}); expect(upgraded.query('SELECT email,quota_bytes FROM users').get()).toEqual({email:'existing@example.com',quota_bytes:0}); expect(upgraded.query("SELECT name FROM pragma_table_info('nodes') WHERE name='entry_ips'").get()).toEqual({name:'entry_ips'}); }
   finally { upgraded.close(); }
 });
 

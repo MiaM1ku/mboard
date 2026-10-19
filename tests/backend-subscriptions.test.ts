@@ -97,19 +97,44 @@ test('invalid or unsafe YAML exclude selectors keep generated members excluded r
  for(const pattern of ['[','(?=private-secret)']){const content=JSON.stringify({proxies:[],'proxy-groups':[{name:'safe',type:'select',proxies:['DIRECT','$proxy_group'],filter:'US|HK','exclude-filter':pattern}],rules:['MATCH,safe']});const result=renderSubscription(template('clashmeta',content),[endpoint({name:'US'}),endpoint({id:2,name:'HK'})]);expect(parse(result.content)['proxy-groups'][0].proxies).toEqual(['DIRECT']);expect(result.warnings.length).toBeGreaterThan(0);expect(result.warnings.join('')).not.toContain('private-secret')}
 });
 
-test('tencent ix hostname becomes one load-balance group over two hidden addresses', () => {
+test('configured entry IPs become one load-balance group over hidden addresses', () => {
   const content = 'proxies: []\nproxy-groups:\n  - {name: 选择, type: select, proxies: [DIRECT]}\n  - {name: 香港自动, type: url-test, filter: "(?i)🇭🇰|港|HK", url: http://cp.cloudflare.com/, interval: 600}\nrules: ["MATCH,选择"]\n';
-  const result = renderSubscription(template('clashmeta', content), [endpoint({ name: '🇭🇰Bage@腾讯IX', host: 'tx.example', port: 50000 }), endpoint({ id: 2, name: '其他节点', host: 'direct.example.test' })]);
+  const result = renderSubscription(template('clashmeta', content), [endpoint({ name: '🇭🇰Bage', host: 'balance.example.test', port: 50000, entry_ips: ['192.0.2.1', '192.0.2.2'] }), endpoint({ id: 2, name: '其他节点', host: 'direct.example.test' })]);
   const root = parse(result.content);
   const hidden = root.proxies.filter((proxy: { hidden?: boolean }) => proxy.hidden);
-  expect(hidden.map((proxy: { server: string }) => proxy.server)).toEqual(['192.0.2.10', '192.0.2.11']);
+  expect(hidden.map((proxy: { server: string }) => proxy.server)).toEqual(['192.0.2.1', '192.0.2.2']);
   expect(root.proxies.filter((proxy: { hidden?: boolean }) => !proxy.hidden).map((proxy: { server: string }) => proxy.server)).toEqual(['direct.example.test']);
-  const balance = root['proxy-groups'].find((group: { name: string }) => group.name === '🇭🇰Bage@腾讯IX');
+  const balance = root['proxy-groups'].find((group: { name: string }) => group.name === '🇭🇰Bage');
   expect(balance).toMatchObject({ type: 'load-balance', strategy: 'round-robin', proxies: hidden.map((proxy: { name: string }) => proxy.name) });
   const select = root['proxy-groups'].find((group: { name: string }) => group.name === '选择');
-  expect(select.proxies).toContain('🇭🇰Bage@腾讯IX');
+  expect(select.proxies).toContain('🇭🇰Bage');
   expect(select.proxies.some((name: string) => hidden.some((proxy: { name: string }) => proxy.name === name))).toBe(false);
-  expect(result.content).not.toContain('tx.example');
+  expect(result.content).not.toContain('balance.example.test');
+});
+test('each node keeps its own entry IP list', () => {
+  const content = 'proxies: []\nproxy-groups:\n  - {name: 选择, type: select, proxies: [DIRECT]}\nrules: ["MATCH,选择"]\n';
+  const result = renderSubscription(template('clashmeta', content), [
+    endpoint({ name: '甲', host: 'a.example.test', entry_ips: ['192.0.2.1', '192.0.2.2'] }),
+    endpoint({ id: 2, name: '乙', host: 'b.example.test', entry_ips: ['192.0.2.3', '192.0.2.4'] }),
+  ]);
+  const root = parse(result.content);
+  expect(root['proxy-groups'].filter((group: { type: string }) => group.type === 'load-balance').map((group: { name: string }) => group.name)).toEqual(['甲', '乙']);
+  expect(root.proxies.filter((proxy: { hidden?: boolean }) => proxy.hidden).map((proxy: { server: string }) => proxy.server)).toEqual(['192.0.2.1', '192.0.2.2', '192.0.2.3', '192.0.2.4']);
+  expect(result.content).not.toContain('a.example.test');
+  expect(result.content).not.toContain('b.example.test');
+});
+test('clients without load-balance receive one node per entry IP', () => {
+  const node = endpoint({ name: '🇭🇰Bage', host: 'balance.example.test', entry_ips: ['192.0.2.1', '192.0.2.2'] });
+  const sing = JSON.parse(renderSubscription(template('singbox'), [node]).content);
+  expect(sing.outbounds.map((outbound: { tag: string }) => outbound.tag)).toEqual(expect.arrayContaining(['🇭🇰Bage · 1', '🇭🇰Bage · 2']));
+  expect(sing.outbounds.filter((outbound: { server?: string }) => outbound.server).map((outbound: { server: string }) => outbound.server).sort()).toEqual(['192.0.2.1', '192.0.2.2']);
+  expect(JSON.stringify(sing)).not.toContain('balance.example.test');
+  const share = renderShareLinks('shadowrocket', [node]);
+  const text = Buffer.from(share.content, 'base64').toString();
+  expect(text).toContain('192.0.2.1');
+  expect(text).toContain('192.0.2.2');
+  expect(text).not.toContain('balance.example.test');
+  expect(share.node_count).toBe(2);
 });
 test('six archived original records seed before defaults, including names, IDs, timestamps and exact bytes', () => {
   const db = database(); legacy(db, synthetic); initializeSubscriptionTemplates(db);
