@@ -89,9 +89,15 @@ function Workspace() {
     window.addEventListener("mboard-session-expired", expired);
     return () => window.removeEventListener("mboard-session-expired", expired);
   }, [auth.reload]);
+  const brand = site.data?.site_name.trim() || "mboard";
+  const mark = Array.from(brand)[0] || "m";
+  const wideMark = (mark.codePointAt(0) ?? 0) > 127;
   useEffect(() => {
-    document.title = `${site.data?.site_name || "mboard"} · mboard`;
-  }, [site.data]);
+    document.title = brand;
+    document
+      .querySelector('meta[name="description"]')
+      ?.setAttribute("content", `${brand} · 连接、授权和流量管理`);
+  }, [brand]);
   useEffect(() => {
     site.reload();
   }, [route.area, route.page, site.reload]);
@@ -187,7 +193,7 @@ function Workspace() {
     return (
       <main className="login-panel" style={{ minHeight: "100vh" }}>
         <div className="login-wrap">
-          <h1>连接 mboard</h1>
+          <h1>连接 {brand}</h1>
           <p>服务连接恢复后，可继续访问面板。</p>
           <ErrorState message={auth.error} retry={auth.reload} />
         </div>
@@ -199,6 +205,9 @@ function Workspace() {
         setup={Boolean(auth.data?.setup_required)}
         refresh={auth.reload}
         description={site.data?.site_description}
+        brand={brand}
+        mark={mark}
+        wideMark={wideMark}
       />
     );
   return (
@@ -211,9 +220,9 @@ function Workspace() {
         aria-label={admin ? "管理面板导航" : "用户面板导航"}
       >
         <a className="brand" href={`#/${admin ? "admin" : "user"}/overview`}>
-          <span className="brand-mark">m</span>
+          <span className={`brand-mark${wideMark ? " is-wide" : ""}`}>{mark}</span>
           <div>
-            <strong>mboard</strong>
+            <strong>{brand}</strong>
             <span>{admin ? "CONTROL ROOM" : "YOUR WORKSPACE"}</span>
           </div>
         </a>
@@ -270,7 +279,7 @@ function Workspace() {
             <LogOut size={18} />
             <span>退出登录</span>
           </button>
-          <div className="sidebar-note">mboard · independent by design</div>
+          <div className="sidebar-note">{brand} · independent by design</div>
         </div>
       </aside>
       <button
@@ -306,7 +315,7 @@ function Workspace() {
           <div className="topbar-actions">
             <span className="workspace-label">
               <span className="status-dot" />
-              {site.data?.site_name || "mboard"}
+              {brand}
             </span>
             <Button
               variant="ghost"
@@ -335,12 +344,13 @@ function Workspace() {
               key={`user-${page}`}
               page={page}
               user={user}
+              siteName={brand}
               onNavigate={navigate}
               onUserRefresh={auth.reload}
             />
           )}
           <footer className="page-footer">
-            <span>mboard / {admin ? "CONTROL ROOM" : "WORKSPACE"}</span>
+            <span>{brand} / {admin ? "CONTROL ROOM" : "WORKSPACE"}</span>
             <span>连接由你掌握</span>
           </footer>
         </main>
@@ -352,10 +362,16 @@ function Auth({
   setup,
   refresh,
   description,
+  brand,
+  mark,
+  wideMark,
 }: {
   setup: boolean;
   refresh: () => void;
   description?: string;
+  brand: string;
+  mark: string;
+  wideMark: boolean;
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -384,11 +400,11 @@ function Auth({
       <main className="login-panel">
         <div className="login-wrap">
           <div className="login-brand">
-            <span className="brand-mark">m</span>
-            <strong>mboard</strong>
+            <span className={`brand-mark${wideMark ? " is-wide" : ""}`}>{mark}</span>
+            <strong>{brand}</strong>
           </div>
           <span className="eyebrow">
-            {setup ? "WELCOME TO MBOARD" : "YOUR WORKSPACE"}
+            {setup ? brand : "YOUR WORKSPACE"}
           </span>
           <h1>{setup ? "建立你的工作区" : "欢迎回来"}</h1>
           <p>
@@ -445,7 +461,7 @@ function Auth({
         </div>
       </main>
       <aside className="login-aside">
-        <span className="eyebrow">MBOARD / INDEPENDENT BY DESIGN</span>
+        <span className="eyebrow">{brand} / INDEPENDENT BY DESIGN</span>
         <div>
           <h2>
             你的网络，
@@ -470,7 +486,7 @@ function Auth({
         </div>
         <div className="login-aside-bottom">
           <span>OWN YOUR CONNECTION</span>
-          <span>mboard</span>
+          <span>{brand}</span>
         </div>
       </aside>
     </div>

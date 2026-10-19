@@ -74,14 +74,22 @@ function Kpi({
     </Card>
   );
 }
+function configDownloadName(siteName: string) {
+  const base =
+    siteName.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim() ||
+    "mboard";
+  return `${base}.json`;
+}
 export function UserPage({
   page,
   user,
+  siteName,
   onNavigate,
   onUserRefresh,
 }: {
   page: string;
   user: User;
+  siteName: string;
   onNavigate: (s: string) => void;
   onUserRefresh: () => void;
 }) {
@@ -90,10 +98,22 @@ export function UserPage({
   if (page === "guides") return <Guides />;
   if (page === "tickets") return <Tickets />;
   if (page === "account")
-    return <Account user={user} onUserRefresh={onUserRefresh} />;
-  return <Home onNavigate={onNavigate} />;
+    return (
+      <Account
+        user={user}
+        siteName={siteName}
+        onUserRefresh={onUserRefresh}
+      />
+    );
+  return <Home onNavigate={onNavigate} siteName={siteName} />;
 }
-function Home({ onNavigate }: { onNavigate: (s: string) => void }) {
+function Home({
+  onNavigate,
+  siteName,
+}: {
+  onNavigate: (s: string) => void;
+  siteName: string;
+}) {
   const resource = useResource<Overview>("overview");
   const { notify } = useToast();
   const [copied, setCopied] = useState(false);
@@ -177,7 +197,7 @@ function Home({ onNavigate }: { onNavigate: (s: string) => void }) {
                   <a
                     className="button button-secondary"
                     href={subscriptionUrl(u)}
-                    download="mboard.json"
+                    download={configDownloadName(siteName)}
                   >
                     <Download size={16} />
                     下载配置
@@ -753,9 +773,11 @@ function Tickets() {
 }
 function Account({
   user,
+  siteName,
   onUserRefresh,
 }: {
   user: User;
+  siteName: string;
   onUserRefresh: () => void;
 }) {
   const [oldPassword, setOld] = useState("");
@@ -874,7 +896,7 @@ function Account({
                 </Button>
                 <a
                   href={subscriptionUrl(user)}
-                  download="mboard.json"
+                  download={configDownloadName(siteName)}
                   className="button button-secondary"
                 >
                   <Download size={16} />

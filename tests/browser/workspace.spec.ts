@@ -423,7 +423,9 @@ test("管理端 CRUD、一次性令牌和站点展示", async ({ page }) => {
   await expect(page.getByRole("button", { name: "保存设置" })).toBeDisabled();
   await page.goto("/#/user/overview");
   await expect(page.locator(".workspace-label")).toHaveText("mboard 验收");
-  await expect(page).toHaveTitle("mboard 验收 · mboard");
+  await expect(page).toHaveTitle("mboard 验收");
+  await expect(page.locator(".brand strong")).toHaveText("mboard 验收");
+  await expect(page.locator(".page-footer span").first()).toHaveText("mboard 验收 / WORKSPACE");
   for (const [route, name] of [
     ["nodes", "验收入口"],
     ["users", "验收账户"],

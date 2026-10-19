@@ -1,5 +1,5 @@
 import { openDatabase, hash, secret } from './database';
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, extname } from 'node:path';
 import { isIP } from 'node:net';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
@@ -382,12 +382,12 @@ export function createApp(options: AppOptions = {}) {
       return new Response(method === 'HEAD' ? null : config, { headers: {
         'Content-Type': rendered.content_type,
         'Content-Length': String(new TextEncoder().encode(config).byteLength),
-        'Content-Disposition': `attachment; filename="mboard.${suffix}"`,
+        ...subscriptionNameHeaders(settings().site_name, suffix),
         'subscription-userinfo': subscriptionUserinfo(u),
         'profile-update-interval': '24',
       } });
     }
-    if (!path.startsWith('/api/')) return staticResponse(req, options.distDir);
+    if (!path.startsWith('/api/')) return staticResponse(req, options.distDir, settings().site_name);
     const u = authenticated(req)!;
     if (path === '/api/v1/me' && method === 'GET') return json(userView(u));
     if (path === '/api/v1/me/password' && method === 'PATCH') {
@@ -601,7 +601,19 @@ export function createApp(options: AppOptions = {}) {
   return { db, fetch, close: () => db.close() };
 }
 
-function staticResponse(req: Request, distDir?: string): Response {
+/** Clash、Mihomo、Stash 用 profile-title；文件名同时给 filename 和 filename*。 */
+function subscriptionNameHeaders(siteName: unknown, suffix: string): Record<string, string> {
+  const name = String(siteName ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) || 'mboard';
+  const fileBase = name.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'mboard';
+  const filename = `${fileBase}.${suffix}`;
+  const ascii = /^[\x20-\x7e]+$/.test(filename) ? filename : `subscription.${suffix}`;
+  const star = encodeURIComponent(filename).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+  return {
+    'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${star}`,
+    'profile-title': `base64:${Buffer.from(name, 'utf8').toString('base64')}`,
+  };
+}
+function staticResponse(req: Request, distDir: string | undefined, siteName: string): Response {
   if (!['GET','HEAD'].includes(req.method)) fail(404,'NOT_FOUND','请检查页面地址');
   if (!distDir || !existsSync(distDir)) fail(404,'NOT_FOUND','页面待构建，请先构建前端');
   const root = realpathSync(distDir); let path: string;
@@ -613,5 +625,14 @@ function staticResponse(req: Request, distDir?: string): Response {
   file = realpathSync(file);
   if (!file.startsWith(root + sep) || !statSync(file).isFile()) fail(404,'NOT_FOUND','请检查文件地址');
   const asset = Bun.file(file);
-  return new Response(req.method === 'HEAD' ? null : asset, { headers: { 'Content-Type':asset.type } });
+  if (file.endsWith(`${sep}index.html`)) {
+    const name = String(siteName).replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100) || 'mboard';
+    const safe = name.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
+    const html = readFileSync(file, 'utf8');
+    const branded = html
+      .replace(/<title>[^<]*<\/title>/i, `<title>${safe}</title>`)
+      .replace(/(<meta\s+name="description"\s+content=")[^"]*(")/i, `$1${safe} · 连接、授权和流量管理$2`);
+    if (branded !== html) return new Response(req.method === 'HEAD' ? null : branded, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+  }
+  return new Response(req.method === 'HEAD' ? null : asset, { headers: { 'Content-Type': asset.type } });
 }

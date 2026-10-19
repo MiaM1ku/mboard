@@ -199,10 +199,20 @@ strong {
   font-family: ui-monospace, monospace;
   line-height: 1;
 }
+.brand > div {
+  min-width: 0;
+}
 .brand strong {
   font-size: 21px;
   font-weight: 650;
   letter-spacing: -0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brand-mark.is-wide {
+  font-size: 15px;
+  font-family: inherit;
 }
 .brand span:last-child {
   display: block;
@@ -984,8 +994,12 @@ strong {
   margin-bottom: 64px;
 }
 .login-brand strong {
+  min-width: 0;
   font-size: 26px;
   letter-spacing: -0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .login-wrap h1 {
   font-size: 32px;
