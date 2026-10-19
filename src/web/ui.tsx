@@ -58,6 +58,13 @@ export function Badge({
 }) {
   return <span className={`badge badge-${tone} ${className}`} {...props} />;
 }
+export function ShareBar({ share }: { share: number }) {
+  return (
+    <span className="mb-custom-share-bar" aria-hidden="true">
+      <span style={{ width: `${Math.min(100, Math.max(2, share * 100))}%` }} />
+    </span>
+  );
+}
 export function Input({
   className = "",
   ...props

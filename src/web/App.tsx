@@ -3,9 +3,11 @@ import {
   Activity,
   ArrowLeft,
   ArrowUpRight,
+  BarChart3,
   BookOpen,
   ChevronRight,
   FileText,
+  Gauge,
   LayoutDashboard,
   LifeBuoy,
   LogOut,
@@ -34,8 +36,8 @@ import { UserPage } from "./UserPages";
 import { AdminPage } from "./AdminPages";
 
 const userNav = [
-  { key: "overview", label: "连接概览", icon: LayoutDashboard },
-  { key: "nodes", label: "连接入口", icon: Network },
+  { key: "overview", label: "我的概览", icon: LayoutDashboard },
+  { key: "nodes", label: "节点用量", icon: BarChart3 },
   { key: "traffic", label: "流量记录", icon: Activity },
   { key: "guides", label: "使用指南", icon: BookOpen },
   { key: "tickets", label: "联系管理员", icon: LifeBuoy },
@@ -45,6 +47,7 @@ const adminNav = [
   { key: "overview", label: "运行概览", icon: LayoutDashboard },
   { key: "nodes", label: "节点管理", icon: Network },
   { key: "machines", label: "服务器", icon: Waypoints },
+  { key: "pools", label: "流量池", icon: Gauge },
   { key: "users", label: "用户授权", icon: Users },
   { key: "groups", label: "权限组", icon: ShieldCheck },
   { key: "content", label: "公告和指南", icon: FileText },

@@ -92,14 +92,20 @@ bun scripts/import-archive.ts \
 
 更新前停止服务并备份 SQLite（或调用 SQLite 在线备份流程）。匹配代码提交和备份数据库一起保存。随后拉取已验证的 Git 提交、安装锁定依赖、构建页面，再启动服务。
 
+部署目录只保存运行产物，git 工作区保持干净。历史提交经过重写，所以更新用 `fetch` 加 `reset --hard`，不要用 `pull`。执行前先确认 `git status` 干净，确认后再丢弃任何本地改动。
+
 ```sh
 systemctl stop mboard.service
 # 此时保存数据库及必要的 WAL/SHM 文件，或执行 SQLite backup。
-git pull --ff-only
+git status --short   # 确认干净
+git fetch origin
+git reset --hard origin/main
 /opt/mboard-runtime/bun/bun install --frozen-lockfile
 /opt/mboard-runtime/bun/bun run build
 systemctl start mboard.service
 ```
+
+首次升级到带流量池的版本时，新的表在启动时自动建立，旧的小时上报记录会一次性回填到按机器的台账。回填只跑一次，用 `runtime_metadata` 里的 `traffic-pools:backfill:v1` 标记。
 
 回退时停止服务，恢复匹配的代码提交和数据库快照，再启动。反向代理的切换由站点管理员操作。源 MySQL 保留为迁移来源和独立回退数据。
 

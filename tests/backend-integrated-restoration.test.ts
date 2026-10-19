@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { parse } from 'yaml';
 import { createApp, type AppOptions } from '../src/server/app';
-import { hash } from '../src/server/database';
-import { activateMachine, compileMachine, provisionMachineToken, restoreRuntime } from '../src/server/runtime';
+import { hash, openDatabase } from '../src/server/database';
+import { activateMachine, compileMachine, initializeRuntime, provisionMachineToken, restoreRuntime, runtimeNodeViews, setRuntimeEntryIPs } from '../src/server/runtime';
 
 // Synthetic source rows only. Every app owns an in-memory DB and closes after its test.
 const apps: ReturnType<typeof createApp>[] = [];
@@ -219,6 +219,49 @@ describe('subscription template REST integration', () => {
   test('builtin singbox keeps legacy node-ID tags and selector membership contract', async () => {
     const f=fixture();f.db.query('INSERT INTO nodes(id,name,host,port,protocol,tls,created_at) VALUES(?,?,?,?,?,?,?)').run(20,'Display name','legacy.example.test',443,'shadowsocks',0,future);f.db.exec('INSERT INTO node_groups VALUES(20,1)');
     const r=await f.request('/s/'+'a'.repeat(64));expect(r.status).toBe(200);const root=JSON.parse(r.text);expect(root.outbounds.find((o:any)=>o.server==='legacy.example.test')).toMatchObject({tag:'node-20',method:'aes-128-gcm',password:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'});expect(root.outbounds.find((o:any)=>o.type==='selector').outbounds).toContain('node-20');
+  });
+  test('panel entry IPs save per runtime node, survive re-import and reach the subscription', async () => {
+    const f=fixture();
+    const before=(await f.request('/api/v1/admin/nodes','GET',undefined,f.adminCookie)).data.find((n:any)=>n.id===11);
+    expect(before).toMatchObject({entry_ips:[],entry_strategy:'round-robin'});
+    const saved=await f.request('/api/v1/admin/runtime-nodes/11/entries','PATCH',{entry_ips:['198.51.100.1','198.51.100.2'],entry_strategy:'consistent-hashing'},f.adminCookie);
+    expect(saved.status).toBe(200);
+    restoreRuntime(f.db);
+    const after=(await f.request('/api/v1/admin/nodes','GET',undefined,f.adminCookie)).data.find((n:any)=>n.id===11);
+    expect(after).toMatchObject({entry_ips:['198.51.100.1','198.51.100.2'],entry_strategy:'consistent-hashing'});
+    expect(runtimeNodeViews(f.db).find(n=>n.id===11)).toMatchObject({entry_ips:['198.51.100.1','198.51.100.2'],entry_strategy:'consistent-hashing'});
+    f.activate(); await f.heartbeat();
+    const sub=await f.request('/api/v1/client/subscribe?token='+'a'.repeat(64)+'&flag=clashmeta','GET',undefined,undefined,{'User-Agent':'clash.meta/1.19.0'});
+    expect(sub.status).toBe(200);
+    const root=parse(sub.text);
+    const group=root['proxy-groups'].find((g:any)=>g.name==='Restored Reality');
+    expect(group).toMatchObject({type:'load-balance',strategy:'consistent-hashing',proxies:['Restored Reality 1','Restored Reality 2']});
+    expect(root.proxies.filter((p:any)=>p.server.startsWith('198.51.100.')).map((p:any)=>p.server)).toEqual(['198.51.100.1','198.51.100.2']);
+    expect(sub.text).not.toContain('reality.example.test');
+  });
+  test('entry API validates addresses, duplicates, limits and strategies for admins only', async () => {
+    const f=fixture();
+    expect((await f.request('/api/v1/admin/runtime-nodes/11/entries','PATCH',{entry_ips:['198.51.100.1']},f.userCookie)).status).toBe(403);
+    for(const body of [{entry_ips:['reality.example.test']},{entry_ips:['198.51.100.1','198.51.100.1']},{entry_ips:Array.from({length:17},(_,i)=>`198.51.100.${i+1}`)},{entry_ips:['198.51.100.1'],entry_strategy:'random'}]) {
+      const r=await f.request('/api/v1/admin/runtime-nodes/11/entries','PATCH',body,f.adminCookie);expect(r.status).toBe(400);
+    }
+    expect((await f.request('/api/v1/admin/runtime-nodes/99/entries','PATCH',{entry_ips:['198.51.100.1']},f.adminCookie)).status).toBe(404);
+    expect((await f.request('/api/v1/admin/runtime-nodes/11/entries','PATCH',{entry_ips:[]},f.adminCookie)).status).toBe(200);
+    expect((await f.request('/api/v1/admin/nodes','GET',undefined,f.adminCookie)).data.find((n:any)=>n.id===11).entry_ips).toEqual([]);
+  });
+  test('legacy payload entry IPs move into their own table exactly once', () => {
+    const db=openDatabase(':memory:');
+    initializeRuntime(db);
+    db.query("DELETE FROM runtime_metadata WHERE key='entries:migrated:v1'").run();
+    db.query('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?)').run(70,null,'vless',1,1,JSON.stringify({id:70,name:'Moved',host:'moved.example.test',port:443,entry_ips:['198.51.100.9'],entry_strategy:'sticky-sessions'}));
+    initializeRuntime(db);
+    expect(db.query('SELECT entry_ips,entry_strategy FROM runtime_node_entries WHERE node_id=70').get()).toEqual({entry_ips:'["198.51.100.9"]',entry_strategy:'sticky-sessions'});
+    expect(JSON.parse((db.query('SELECT payload FROM runtime_nodes WHERE id=70').get() as any).payload).entry_ips).toBeUndefined();
+    setRuntimeEntryIPs(db,70,['198.51.100.10'],'round-robin');
+    db.query("DELETE FROM runtime_metadata WHERE key='entries:migrated:v1'").run();
+    initializeRuntime(db);
+    expect(db.query('SELECT entry_ips FROM runtime_node_entries WHERE node_id=70').get()).toEqual({entry_ips:'["198.51.100.10"]'});
+    db.close();
   });
   test('subscription Host scope blocks admin/node APIs, writes and foreign hosts', async () => {
     const f=fixture({publicOrigin:'https://panel.example.test',subscriptionOrigin:'https://sub.example.test'});f.activate();await f.heartbeat();

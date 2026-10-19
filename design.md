@@ -73,6 +73,10 @@ version: motion-2026-10-13
 | 指标 | .kpi-card, .kpi-top, .kpi-value, .kpi-hint | src/web/styles.css | 计数与用量概览 | 已实现 |
 | 信息组 | .info-list, .info-row, .callout | src/web/styles.css | 键值数据和解释 | 已实现 |
 | 强调表面 | .subscription-card, .subscription-actions, .subscription-meta, .usage-track, .quick-link, .guide-details | src/web/styles.css | 主要入口、比例和展开长文 | 已实现 |
+| 占比 | ShareBar; .mb-custom-share, .mb-custom-share-bar | src/web/ui.tsx, styles.css | 节点和用户的占比条 | 已实现 |
+| 额度进度 | .usage-track 的状态色 is-ok、is-warning、is-danger | src/web/styles.css | 额度、余量进度 | 已实现 |
+| 流量池卡片 | .mb-custom-pool-grid, .mb-custom-pool-card, .mb-custom-pool-head, .mb-custom-pool-figure | src/web/styles.css | 周期额度概览 | 已实现 |
+| 额度数值 | .mb-custom-quota-figure | src/web/styles.css | 已用量和额度并排 | 已实现 |
 
 [SHOULD] 最小组合：`<Card><div className="card-header"><h2>标题</h2></div><div className="card-body">内容</div></Card>`。
 [SHOULD] 控件组合：`<Field label="名称"><Input required /></Field>`。

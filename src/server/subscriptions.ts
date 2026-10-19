@@ -15,8 +15,10 @@ export interface SubscriptionEndpoint {
   settings?: Record<string, any>;
   /** Optional compiled sing-box chain. Its last element is the public outbound. */
   native_outbounds?: Record<string, any>[];
-  /** Two or more direct IP entry points. Never a hostname. */
+  /** Direct IP entry points. A hostname stays in the service address field. */
   entry_ips?: string[];
+  /** How a client with load-balance support spreads connections over the entry IPs. */
+  entry_strategy?: EntryStrategy;
 }
 export interface TemplateIssue { message: string; line?: number; column?: number }
 export interface TemplateValidation { valid: boolean; errors: TemplateIssue[]; warnings: string[] }
@@ -39,29 +41,41 @@ export class EntryIPError extends Error {
   readonly status = 400;
   constructor(message: string) { super(message); this.name = 'EntryIPError'; }
 }
-const LOAD_BALANCE_FORMATS = new Set<TemplateName>(['clash', 'clashmeta', 'stash']);
-/** Accept only a repeatable list of direct IP addresses. A hostname is not an entry. */
+export const ENTRY_STRATEGIES = ['round-robin', 'consistent-hashing', 'sticky-sessions'] as const;
+export type EntryStrategy = typeof ENTRY_STRATEGIES[number];
+export const DEFAULT_ENTRY_STRATEGY: EntryStrategy = 'round-robin';
+/** Surge and Surfboard both document a load-balance proxy group. */
+const LOAD_BALANCE_FORMATS = new Set<TemplateName>(['clash', 'clashmeta', 'stash', 'surge', 'surfboard']);
+/** Entry IPs are direct addresses. A hostname belongs in the service address field. */
 export function validateEntryIPs(value: unknown): string[] {
   if (value == null || (Array.isArray(value) && value.length === 0)) return [];
-  if (!Array.isArray(value)) throw new EntryIPError('负载均衡入口需要是 IP 列表');
-  const ips = value.map(item => { if (typeof item !== 'string') throw new EntryIPError('负载均衡入口请填写 IP，不要填写域名'); return item.trim(); });
-  if (ips.some(ip => !ip) || ips.some(ip => isIP(ip) === 0)) throw new EntryIPError('负载均衡入口请填写 IP，不要填写域名');
-  if (ips.length === 1) throw new EntryIPError('负载均衡入口至少填写两个 IP，或留空');
-  if (ips.length > 16) throw new EntryIPError('负载均衡入口最多 16 个 IP');
-  if (new Set(ips).size !== ips.length) throw new EntryIPError('负载均衡入口里的 IP 不能重复');
+  if (!Array.isArray(value)) throw new EntryIPError('连接入口需要是 IP 列表');
+  const ips = value.map(item => { if (typeof item !== 'string') throw new EntryIPError('请填写 IP 地址，例如 203.0.113.10'); return item.trim(); });
+  if (ips.some(ip => !ip || isIP(ip) === 0)) throw new EntryIPError('请填写 IP 地址，例如 203.0.113.10');
+  if (ips.length > 16) throw new EntryIPError('最多填写 16 个 IP');
+  if (new Set(ips).size !== ips.length) throw new EntryIPError('每个 IP 填写一次');
   return ips;
+}
+export function validateEntryStrategy(value: unknown): EntryStrategy {
+  if (value == null || value === '') return DEFAULT_ENTRY_STRATEGY;
+  if (typeof value !== 'string' || !(ENTRY_STRATEGIES as readonly string[]).includes(value)) throw new EntryIPError('请选择轮询、按目标固定或按来源固定');
+  return value as EntryStrategy;
 }
 function normalizeEntryIPs(value: unknown): string[] {
   try { return validateEntryIPs(value); } catch { return []; }
+}
+function normalizeEntryStrategy(value: unknown): EntryStrategy {
+  try { return validateEntryStrategy(value); } catch { return DEFAULT_ENTRY_STRATEGY; }
 }
 function presentEndpoints(endpoints: SubscriptionEndpoint[], format: string): SubscriptionEndpoint[] {
   const balance = LOAD_BALANCE_FORMATS.has(format as TemplateName);
   const presented: SubscriptionEndpoint[] = [];
   for (const endpoint of endpoints) {
     const ips = normalizeEntryIPs(endpoint.entry_ips);
-    if (ips.length < 2) { presented.push({ ...endpoint, entry_ips: undefined }); continue; }
-    if (balance) { presented.push({ ...endpoint, entry_ips: ips }); continue; }
-    ips.forEach((ip, index) => presented.push({ ...endpoint, name: `${endpoint.name} · ${index + 1}`, host: ip, entry_ips: undefined }));
+    if (!ips.length) { presented.push({ ...endpoint, entry_ips: undefined, entry_strategy: undefined }); continue; }
+    if (ips.length === 1) { presented.push({ ...endpoint, host: ips[0], entry_ips: undefined, entry_strategy: undefined }); continue; }
+    if (balance) { presented.push({ ...endpoint, entry_ips: ips, entry_strategy: normalizeEntryStrategy(endpoint.entry_strategy) }); continue; }
+    ips.forEach((ip, index) => presented.push({ ...endpoint, name: `${endpoint.name} ${index + 1}`, host: ip, entry_ips: undefined, entry_strategy: undefined }));
   }
   return presented;
 }
@@ -348,7 +362,7 @@ function singboxOutbound(e: SubscriptionEndpoint): Record<string, any> {
 function yamlOutbound(e: SubscriptionEndpoint): Record<string, any> {
   const s = e.settings || {}, tls = s.tls || {}, p = e.protocol === 'ss' ? 'shadowsocks' : e.protocol;
   const result: Record<string, any> = { name: e.name, type: p === 'shadowsocks' ? 'ss' : p, server: e.host, port: e.port, udp: true };
-  if (e.entry_ips?.length) result.entry_ips = e.entry_ips;
+  if (e.entry_ips?.length) { result.entry_ips = e.entry_ips; result.entry_strategy = e.entry_strategy || DEFAULT_ENTRY_STRATEGY; }
   if (p === 'shadowsocks') { result.cipher = s.method; result.password = e.credential; }
   else if (p === 'vless') { result.uuid = e.credential; if (s.flow) result.flow = s.flow; result.tls = !!tls.enabled; }
   else result.password = e.credential;
@@ -628,7 +642,7 @@ function iniPair(line: string): { key: string; value: string } | null {
   return null;
 }
 function unquote(value: string): string { return value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1).replace(/\\([\\"])/g, '$1') : value; }
-function fillIni(config: IniConfig, generated: string[], names: string[], warnings: string[]): string {
+function fillIni(config: IniConfig, generated: string[], names: string[], warnings: string[], extraGroups: string[] = []): string {
   const proxy = config.sections.find(s => s.name === 'proxy')!;
   let injected = false;
   proxy.lines = proxy.lines.flatMap(line => {
@@ -664,6 +678,7 @@ function fillIni(config: IniConfig, generated: string[], names: string[], warnin
     if (!hasPlaceholder && !additions.length) return line;
     return `${pair.key} = ${rawType}, ${[...filled, ...options].join(', ')}`;
   });
+  if (extraGroups.length) groups.lines.push(...extraGroups);
   return [...config.preamble, ...config.sections.flatMap(s => [s.header, ...s.lines])].join(config.eol) + (config.trailing ? config.eol : '');
 }
 function metadataText(text: string, metadata: RenderOptions['metadata'], keys: string[]): string {
@@ -673,17 +688,40 @@ function metadataText(text: string, metadata: RenderOptions['metadata'], keys: s
     return keys.includes(key) && typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ') : marker;
   });
 }
-function expandLoadBalance(proxies: Record<string, any>[]): { proxies: Record<string, any>[]; groups: Record<string, any>[] } {
+function memberName(base: string, index: number, reserved: Set<string>): string {
+  const preferred = `${base} ${index + 1}`;
+  let name = preferred, suffix = 2;
+  while (reserved.has(name)) name = `${preferred} (${suffix++})`;
+  reserved.add(name);
+  return name;
+}
+function expandLoadBalance(proxies: Record<string, any>[], reserved: Set<string> = new Set()): { proxies: Record<string, any>[]; groups: Record<string, any>[] } {
   const next: Record<string, any>[] = [], groups: Record<string, any>[] = [];
   for (const proxy of proxies) {
     const ips = normalizeEntryIPs(proxy.entry_ips);
-    delete proxy.entry_ips;
+    const strategy = normalizeEntryStrategy(proxy.entry_strategy);
+    delete proxy.entry_ips; delete proxy.entry_strategy;
     if (ips.length < 2) { next.push(proxy); continue; }
-    const members = ips.map((ip, index) => ({ ...structuredClone(proxy), name: `${proxy.name} · ${index + 1}`, server: ip, hidden: true }));
+    const members = ips.map((ip, index) => ({ ...structuredClone(proxy), name: memberName(proxy.name, index, reserved), server: ip, hidden: true }));
     next.push(...members);
-    groups.push({ name: proxy.name, type: 'load-balance', strategy: 'round-robin', url: 'http://cp.cloudflare.com/', interval: 300, lazy: true, proxies: members.map(member => member.name) });
+    groups.push({ name: proxy.name, type: 'load-balance', strategy, url: 'http://cp.cloudflare.com/', interval: 300, lazy: true, proxies: members.map(member => member.name) });
   }
   return { proxies: next, groups };
+}
+/** Surge and Surfboard spread a load-balance group over separate proxy lines. */
+function expandIniLoadBalance(endpoints: SubscriptionEndpoint[], format: TemplateName, reserved: Set<string>): { endpoints: SubscriptionEndpoint[]; names: string[]; groups: string[] } {
+  const next: SubscriptionEndpoint[] = [], names: string[] = [], groups: string[] = [];
+  for (const endpoint of endpoints) {
+    const ips = normalizeEntryIPs(endpoint.entry_ips);
+    const strategy = normalizeEntryStrategy(endpoint.entry_strategy);
+    if (ips.length < 2) { next.push({ ...endpoint, entry_ips: undefined, entry_strategy: undefined }); names.push(endpoint.name); continue; }
+    const members = ips.map((ip, index) => ({ ...endpoint, name: memberName(endpoint.name, index, reserved), host: ip, entry_ips: undefined, entry_strategy: undefined }));
+    next.push(...members);
+    names.push(endpoint.name);
+    const options = format === 'surge' ? ['url=http://cp.cloudflare.com/', 'interval=300', ...(strategy === 'round-robin' ? [] : ['persistent=true'])] : [];
+    groups.push(`${iniToken(endpoint.name)} = load-balance, ${[...members.map(member => iniToken(member.name)), ...options].join(', ')}`);
+  }
+  return { endpoints: next, names, groups };
 }
 /** Render ONLY caller-authorized endpoints. No DB lookups, executable templates or provider network requests. */
 export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' | 'content'>, endpoints: SubscriptionEndpoint[], options: RenderOptions = {}): SubscriptionRender {
@@ -746,7 +784,7 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
     migrateSingboxRendered(root!, version(options, 'singbox'), warnings);
     content = JSON.stringify(root, null, 2) + '\n';
   } else if (root && doc) {
-    const balanced = expandLoadBalance(permitted.map(yamlOutbound));
+    const balanced = expandLoadBalance(permitted.map(yamlOutbound), new Set(reserved));
     const generated = balanced.proxies;
     const dialer=clashMetaDialer(root,name);
     if(dialer){
@@ -809,7 +847,10 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
       if (removedAnchors.has(node.source)) return doc!.createNode(removedAnchors.get(node.source));
     } });
     try { content = String(doc); } catch { throw issue('请检查 YAML 动态分组锚点，再重试解析。'); }
-  } else content = fillIni(ini!, permitted.map(e => iniOutbound(e, name)), names, warnings);
+  } else {
+    const iniLayout = expandIniLoadBalance(permitted, name, new Set(reserved));
+    content = fillIni(ini!, iniLayout.endpoints.map(e => iniOutbound(e, name)), iniLayout.names, warnings, iniLayout.groups);
+  }
   return { template_name: name, content_type: name === 'singbox' ? 'application/json; charset=utf-8' : root ? 'text/yaml; charset=utf-8' : 'text/plain; charset=utf-8', content, node_count: permitted.length, warnings };
 }
 function rawurlencode(value: string): string {

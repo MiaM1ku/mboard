@@ -192,6 +192,7 @@ test("桌面和移动布局、双主题、页面能力文案", async ({ page }) 
             "users",
             "nodes",
             "machines",
+            "pools",
             "groups",
             "content",
             "tickets",
@@ -227,12 +228,12 @@ test("桌面和移动布局、双主题、页面能力文案", async ({ page }) 
   await expect(page.locator(".traffic-chart polygon")).toHaveCount(0);
   await expect(page.locator(".traffic-chart circle")).toHaveCount(2);
   await page.goto("/#/user/overview");
-  await expect(page.getByRole("heading", { name: "连接，从这里开始", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "我的用量", exact: true })).toBeVisible();
   await expect(page.locator('.mb-custom-motion-number[data-motion-state="animating"]')).toHaveCount(0);
   await page.getByRole("button", { name: "切换深色主题" }).click();
   await expect(page.locator("html")).toHaveClass("dark");
   await invariant(page);
-  await expect(page.locator(".card").first()).toHaveCSS("background-color", "rgb(24, 47, 46)");
+  await expect(page.locator(".kpi-card").first()).toHaveCSS("background-color", "rgb(24, 47, 46)");
   await page.screenshot({ path: "docs/review/user-dark.png", fullPage: true, animations: "disabled" });
   expect(errors).toEqual([]);
   const metrics = await page.evaluate(() => {
@@ -266,7 +267,7 @@ test("用户提交问题、管理员回复、订阅下载", async ({ page }) => 
   await login(page, reader);
   await page.goto("/#/user/overview");
   await expect(
-    page.getByRole("heading", { name: "连接，从这里开始" }),
+    page.getByRole("heading", { name: "我的用量" }),
   ).toBeVisible();
   await expect(page.locator(".kpi-value").first()).toHaveText(/9\.31 GB/);
   const dl = page.locator("a[download]").first();
@@ -633,8 +634,8 @@ test("页面、图表和导航动效保留布局与真实数据点", async ({ pa
   const marker = page.locator(".mb-custom-nav-marker");
   await expect(marker).toHaveCSS("transition-duration", "0.42s, 0.24s, 0.16s");
   const previous = await marker.getAttribute("style");
-  await page.getByRole("link", { name: "连接入口", exact: true }).click();
-  await expect(page.locator("h1")).toHaveText("连接入口");
+  await page.getByRole("link", { name: "节点用量", exact: true }).click();
+  await expect(page.locator("h1")).toHaveText("节点用量");
   await expect.poll(() => marker.getAttribute("style")).not.toBe(previous);
   await page.route("**/api/v1/overview", async route => {
     const response = await route.fetch();
@@ -720,7 +721,71 @@ test("弹窗进退场、提示反馈和减少动态效果的键盘操作", async
   await expect(page.locator(".mb-custom-motion-number")).toHaveCount(4);
   await expect(page.locator('.mb-custom-motion-number[data-motion-state="animating"]')).toHaveCount(0);
   const overview = (await (await page.request.get("/api/v1/admin/overview")).json()).data;
-  expect(Number(await page.locator(".mb-custom-motion-number").first().getAttribute("data-motion-value"))).toBe(overview.users);
+  expect(Number(await page.locator(".mb-custom-motion-number").first().getAttribute("data-motion-value"))).toBe(overview.today.upload_bytes + overview.today.download_bytes);
   await invariant(page);
   await page.screenshot({ path: "docs/review/motion/admin-desktop.png", fullPage: true, animations: "disabled" });
 });
+test("节点连接入口支持多个 IP 和分配方式", async ({ page }) => {
+  await login(page);
+  await post(page.request, "admin/groups", { name: "入口分组" });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/admin/nodes");
+  await page
+    .getByRole("button", { name: "创建节点", exact: true })
+    .first()
+    .click();
+  const d = page.getByRole("dialog");
+  await d.getByLabel("节点名称").fill("入口验收");
+  await d.getByLabel("服务地址").fill("127.0.0.1");
+  await d.getByLabel("监听端口").fill("19446");
+  await d.getByLabel("协议", { exact: true }).selectOption("shadowsocks");
+  await d
+    .getByLabel("接入机器")
+    .selectOption({ label: "Tokyo · 01 · 127.0.0.1" });
+  await d.getByLabel("入口分组", { exact: true }).check();
+  await d.getByRole("button", { name: "添加入口" }).click();
+  await d.getByLabel("连接入口 IP 1").fill("203.0.113.10");
+  await d.getByRole("button", { name: "添加入口" }).click();
+  await d.getByLabel("连接入口 IP 2").fill("203.0.113.11");
+  await d.getByLabel("分配方式").selectOption("consistent-hashing");
+  await d.getByRole("button", { name: "创建节点", exact: true }).click();
+  await expect(
+    page.getByText("入口 2 个 · 按目标固定", { exact: false }),
+  ).toBeVisible();
+  await invariant(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await invariant(page);
+});
+
+test("流量池记录周期额度并在概览显示余量", async ({ page }) => {
+  await login(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/admin/pools");
+  await expect(page.locator(".mb-custom-loading")).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "创建流量池", exact: true })
+    .first()
+    .click();
+  const d = page.getByRole("dialog");
+  await d.getByLabel("流量池名称").fill("腾讯IX");
+  await d.getByLabel("周期额度").fill("3");
+  await d.getByLabel("额度单位").selectOption("TB");
+  await d.getByLabel("重置日").fill("10");
+  await d.getByLabel("Tokyo · 01 · 127.0.0.1").check();
+  await d.getByRole("button", { name: "创建流量池", exact: true }).click();
+  await expect(
+    page.getByRole("cell", { name: "腾讯IX 入口池 · 单向计费" }),
+  ).toBeVisible();
+  await invariant(page);
+  await page.goto("/#/admin/overview");
+  await expect(
+    page.locator(".card-header h2", { hasText: "流量池" }),
+  ).toBeVisible();
+  await expect(page.locator(".mb-custom-pool-card").first()).toContainText(
+    "腾讯IX",
+  );
+  await invariant(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await invariant(page);
+});
+

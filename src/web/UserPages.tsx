@@ -24,6 +24,7 @@ import {
 } from "./api";
 import type {
   Node,
+  NodeUsage,
   Overview,
   TrafficPoint,
   Guide,
@@ -42,6 +43,7 @@ import {
   Modal,
   PageHeader,
   Select,
+  ShareBar,
   Textarea,
   useToast,
 } from "./ui";
@@ -132,12 +134,44 @@ function Home({
   const percent = u?.quota_bytes
     ? Math.min(100, (total / u.quota_bytes) * 100)
     : 0;
+  const data = resource.data;
+  const stats = data
+    ? [
+        {
+          title: "今日",
+          value: data.today_bytes.upload_bytes + data.today_bytes.download_bytes,
+          hint: `上传 ${formatBytes(data.today_bytes.upload_bytes)} · 下载 ${formatBytes(data.today_bytes.download_bytes)}`,
+          icon: <Signal size={18} />,
+        },
+        {
+          title: "近 7 天",
+          value: data.week_bytes.upload_bytes + data.week_bytes.download_bytes,
+          hint: `上传 ${formatBytes(data.week_bytes.upload_bytes)} · 下载 ${formatBytes(data.week_bytes.download_bytes)}`,
+          icon: <ArrowUp size={18} />,
+        },
+        {
+          title: "近 30 天",
+          value: data.traffic.reduce(
+            (sum, point) => sum + point.upload_bytes + point.download_bytes,
+            0,
+          ),
+          hint: "近 30 天按 UTC 日期累计",
+          icon: <ArrowDown size={18} />,
+        },
+        {
+          title: "本月",
+          value: data.month_bytes.upload_bytes + data.month_bytes.download_bytes,
+          hint: "本月累计，按 UTC 日期统计",
+          icon: <SlidersHorizontal size={18} />,
+        },
+      ]
+    : [];
   return (
     <>
       <PageHeader
-        title="连接，从这里开始"
-        description="查看访问授权、订阅入口和每一天的用量。"
-        eyebrow="YOUR CONNECTION"
+        title="我的用量"
+        description="查看额度、每一天的流量，以及你最常用的节点。"
+        eyebrow="MY USAGE"
         actions={
           <Button variant="secondary" onClick={resource.reload}>
             <RefreshCw size={16} />
@@ -150,163 +184,176 @@ function Home({
       )}{" "}
       {resource.loading ? (
         <Loading />
-      ) : resource.data && u ? (
+      ) : data && u ? (
         <>
+          <Card className="subscription-card">
+            <span className="eyebrow">QUOTA</span>
+            <h2>本期用量</h2>
+            <div className="mb-custom-quota-figure">
+              <span className="kpi-value">
+                <AnimatedValue value={total} format={formatBytes} />
+              </span>
+              <span className="muted">
+                {u.quota_bytes
+                  ? ` / ${formatBytes(u.quota_bytes)}`
+                  : " · 按实际用量累计"}
+              </span>
+            </div>
+            {u.quota_bytes > 0 && (
+              <div
+                className="usage-track"
+                role="progressbar"
+                aria-label="额度用量"
+                aria-valuenow={Math.round(percent)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <span
+                  className={percent >= 90 ? "is-warning" : ""}
+                  style={{ width: `${Math.max(1, percent)}%` }}
+                />
+              </div>
+            )}
+            <div className="subscription-meta">
+              <div>
+                <span>剩余额度</span>
+                <strong>
+                  {u.quota_bytes
+                    ? formatBytes(Math.max(0, u.quota_bytes - total))
+                    : "按实际用量累计"}
+                </strong>
+              </div>
+              <div>
+                <span>有效期</span>
+                <strong>{formatDate(u.expires_at)}</strong>
+              </div>
+              <div>
+                <span>账号状态</span>
+                <strong>{u.enabled ? "账号启用" : "账号暂停"}</strong>
+              </div>
+            </div>
+            <div className="subscription-actions">
+              <Button onClick={() => void copy()}>
+                {copied ? <Check size={16} /> : <Copy size={16} />}
+                复制订阅链接
+              </Button>
+              <a
+                className="button button-secondary"
+                href={subscriptionUrl(u)}
+                download={configDownloadName(siteName)}
+              >
+                <Download size={16} />
+                下载配置
+              </a>
+            </div>
+          </Card>
           <div className="kpi-grid">
-            <Kpi
-              title="累计用量"
-              value={total}
-              format={formatBytes}
-              hint="上传 + 下载"
-              icon={<Signal size={18} />}
-            />
-            <Kpi
-              title="可用节点"
-              value={resource.data.nodes.length}
-              hint="按权限组分配"
-              icon={<Network size={18} />}
-            />
-            <Kpi
-              title="上传流量"
-              value={u.upload_bytes}
-              format={formatBytes}
-              hint="账号累计记录"
-              icon={<ArrowUp size={18} />}
-            />
-            <Kpi
-              title="下载流量"
-              value={u.download_bytes}
-              format={formatBytes}
-              hint="账号累计记录"
-              icon={<ArrowDown size={18} />}
-            />
+            {stats.map((stat) => (
+              <Kpi
+                key={stat.title}
+                title={stat.title}
+                value={stat.value}
+                format={formatBytes}
+                hint={stat.hint}
+                icon={stat.icon}
+              />
+            ))}
           </div>
           <div className="dashboard-grid">
             <div className="section-stack">
-              <Card className="subscription-card">
-                <span className="eyebrow">SUBSCRIPTION</span>
-                <h2>一个链接，接入你的网络</h2>
-                <p>
-                  复制订阅链接或下载 sing-box 配置，导入客户端后选择连接入口。
-                </p>
-                <div className="subscription-actions">
-                  <Button onClick={() => void copy()}>
-                    {copied ? <Check size={16} /> : <Copy size={16} />}
-                    复制订阅链接
-                  </Button>
-                  <a
-                    className="button button-secondary"
-                    href={subscriptionUrl(u)}
-                    download={configDownloadName(siteName)}
-                  >
-                    <Download size={16} />
-                    下载配置
-                  </a>
-                </div>
-                <div className="subscription-meta">
-                  <div>
-                    <span>账号状态</span>
-                    <strong>{u.enabled ? "账号启用" : "账号暂停"}</strong>
-                  </div>
-                  <div>
-                    <span>有效期</span>
-                    <strong>{formatDate(u.expires_at)}</strong>
-                  </div>
-                </div>
-              </Card>
-              <TrafficChart data={resource.data.traffic} />
+              <TrafficChart data={data.traffic} />
             </div>
             <div className="section-stack">
               <Card>
-                <div className="card-header">
+                <div className="card-header mb-custom-toolbar">
                   <div>
-                    <h2>用量概况</h2>
-                    <p>掌握你的访问额度</p>
+                    <h2>常用节点</h2>
+                    <p>近 30 天你在各节点上的流量。</p>
                   </div>
-                  <ShieldCheck size={18} className="muted" />
+                  <Button
+                    variant="ghost"
+                    size="small"
+                    onClick={() => onNavigate("nodes")}
+                  >
+                    节点用量 →
+                  </Button>
                 </div>
-                <div className="card-body">
-                  <div className="info-row">
-                    <span>累计用量</span>
-                    <strong>{formatBytes(total)}</strong>
-                  </div>
-                  <div className="info-row">
-                    <span>额度模式</span>
-                    <strong>
-                      {u.quota_bytes
-                        ? formatBytes(u.quota_bytes)
-                        : "按实际用量累计"}
-                    </strong>
-                  </div>
-                  {u.quota_bytes > 0 && (
-                    <>
-                      <div
-                        className="usage-track"
-                        role="progressbar"
-                        aria-label="额度用量"
-                        aria-valuenow={Math.round(percent)}
-                        aria-valuemin={0}
-                        aria-valuemax={100}
-                      >
-                        <span style={{ width: `${percent}%` }} />
+                {data.top_nodes.length ? (
+                  <div className="card-body mb-custom-record-list">
+                    {data.top_nodes.map((node) => (
+                      <div className="mb-custom-record" key={node.id}>
+                        <div className="mb-custom-record-heading">
+                          <strong>{node.name}</strong>
+                          <span className="mb-custom-meta">
+                            {formatBytes(node.bytes)}
+                          </span>
+                        </div>
+                        <ShareBar share={node.share} />
                       </div>
-                      <span className="muted">
-                        剩余额度{" "}
-                        {formatBytes(Math.max(0, u.quota_bytes - total))}
-                      </span>
-                    </>
-                  )}
-                </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="card-body">
+                    <p className="mb-custom-meta">
+                      近 30 天暂无节点流量。
+                    </p>
+                  </div>
+                )}
               </Card>
-              <Card>
-                <div className="card-header">
-                  <h2>开始使用</h2>
-                </div>
-                <div className="card-body">
-                  {[
-                    {
-                      page: "nodes",
-                      title: "选择连接入口",
-                      text: "查看协议和节点状态",
-                      icon: Network,
-                    },
-                    {
-                      page: "guides",
-                      title: "阅读使用指南",
-                      text: "配置客户端和连接方式",
-                      icon: BookOpen,
-                    },
-                    {
-                      page: "tickets",
-                      title: "联系管理员",
-                      text: "提交问题并查看回复",
-                      icon: LifeBuoy,
-                    },
-                  ].map((item) => (
-                    <button
-                      type="button"
-                      className="quick-link"
-                      key={item.page}
-                      onClick={() => onNavigate(item.page)}
-                      style={{
-                        width: "100%",
-                        borderLeft: 0,
-                        borderRight: 0,
-                        borderTop: 0,
-                        background: "transparent",
-                        textAlign: "left",
-                      }}
-                    >
-                      <item.icon size={19} />
-                      <div>
-                        <strong>{item.title}</strong>
-                        <span>{item.text}</span>
+              {data.pools.length > 0 && (
+                <Card>
+                  <div className="card-header">
+                    <div>
+                      <h2>线路余量</h2>
+                      <p>你可用线路所属流量池的剩余比例。</p>
+                    </div>
+                  </div>
+                  <div className="card-body mb-custom-record-list">
+                    {data.pools.map((pool) => (
+                      <div className="mb-custom-record" key={pool.id}>
+                        <div className="mb-custom-record-heading">
+                          <strong>{pool.name}</strong>
+                          <Badge
+                            tone={
+                              pool.status === "exceeded"
+                                ? "danger"
+                                : pool.status === "warning"
+                                  ? "warning"
+                                  : "success"
+                            }
+                          >
+                            {pool.status === "exceeded"
+                              ? "已超额度"
+                              : pool.status === "warning"
+                                ? "接近上限"
+                                : "正常"}
+                          </Badge>
+                        </div>
+                        <div
+                          className="usage-track"
+                          role="progressbar"
+                          aria-label={`${pool.name} 剩余`}
+                          aria-valuenow={pool.remaining_percent}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                        >
+                          <span
+                            className={`is-${pool.status === "ok" ? "ok" : pool.status}`}
+                            style={{
+                              width: `${Math.max(1, pool.remaining_percent)}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="mb-custom-meta">
+                          剩余 {pool.remaining_percent}% ·{" "}
+                          {pool.cycle_end.slice(5)} 重置 · 还有 {pool.days_left}{" "}
+                          天
+                        </span>
                       </div>
-                      <ArrowUpRight size={16} className="muted" />
-                    </button>
-                  ))}
-                </div>
-              </Card>
+                    ))}
+                  </div>
+                </Card>
+              )}
             </div>
           </div>
           <Card>
@@ -316,9 +363,9 @@ function Home({
                 <p>来自管理员的最新消息</p>
               </div>
             </div>
-            {resource.data.notices.length ? (
+            {data.notices.length ? (
               <div className="card-body section-stack">
-                {resource.data.notices.map((n) => (
+                {data.notices.map((n) => (
                   <article key={n.id}>
                     <div className="mb-custom-record-heading">
                       <h3>{n.title}</h3>
@@ -343,76 +390,80 @@ function Home({
   );
 }
 function Nodes() {
-  const r = useResource<Node[]>("nodes");
-  const [search, setSearch] = useState("");
-  const list =
-    r.data?.filter((n) =>
-      `${n.name} ${n.host} ${n.protocol}`
-        .toLowerCase()
-        .includes(search.toLowerCase()),
-    ) || [];
+  const [days, setDays] = useState("30");
+  const r = useResource<NodeUsage[]>(`me/node-usage?days=${days}`);
   return (
     <>
       <PageHeader
-        title="连接入口"
-        description="查看你的授权节点，选择合适的协议和入口。"
-        eyebrow="NETWORK"
+        title="节点用量"
+        description="查看每个节点上的流量，挑出最顺手的那条线路。"
+        eyebrow="NODE USAGE"
         actions={
-          <Button variant="secondary" onClick={r.reload}>
-            <RefreshCw size={16} />
-            刷新状态
-          </Button>
+          <div className="mb-custom-actions">
+            <label>
+              <Select
+                aria-label="节点用量时间范围"
+                value={days}
+                onChange={(e) => setDays(e.target.value)}
+              >
+                <option value="7">最近 7 天</option>
+                <option value="30">最近 30 天</option>
+                <option value="90">最近 90 天</option>
+              </Select>
+            </label>
+            <Button variant="secondary" onClick={r.reload}>
+              <RefreshCw size={16} />
+              刷新数据
+            </Button>
+          </div>
         }
       />
       {r.error && <ErrorState message={r.error} retry={r.reload} />}
       <Card>
-        <div className="mb-custom-toolbar">
-          <label className="mb-custom-filter">
-            <Input
-              aria-label="搜索节点"
-              placeholder="搜索名称、地址或协议"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </label>
-          <span className="muted">
-            {r.loading ? "正在读取节点…" : `${list.length} 个连接入口`}
-          </span>
-        </div>
         {r.loading ? (
           <Loading />
-        ) : list.length ? (
+        ) : r.data?.length ? (
           <div className="table-wrap">
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>节点名称</th>
-                  <th>协议</th>
-                  <th>入口地址</th>
-                  <th>传输安全</th>
-                  <th>状态</th>
+                  <th>节点</th>
+                  <th>合计</th>
+                  <th>上传</th>
+                  <th>下载</th>
+                  <th>最近使用</th>
+                  <th>所属线路</th>
                 </tr>
               </thead>
               <tbody>
-                {list.map((n) => (
-                  <tr key={n.id}>
+                {r.data.map((node) => (
+                  <tr key={node.id}>
                     <td>
                       <div className="node-cell">
                         <Network size={17} className="muted" />
-                        <strong>{n.name}</strong>
+                        <strong>{node.name}</strong>
+                      </div>
+                      <div className="mb-custom-meta">
+                        {node.available ? "可用" : "已停用"}
                       </div>
                     </td>
                     <td>
-                      <Badge tone="info">{n.protocol.toUpperCase()}</Badge>
+                      <div className="mb-custom-share">
+                        <span>
+                          {node.total_bytes
+                            ? formatBytes(node.total_bytes)
+                            : "这段时间暂无流量"}
+                        </span>
+                        <ShareBar share={node.share} />
+                      </div>
                     </td>
-                    <td className="mono">
-                      {n.host}:{n.port}
-                    </td>
-                    <td>{n.tls ? "TLS 加密" : "协议原生传输"}</td>
-                    <td>
-                      <Badge tone={n.online ? "success" : "warning"}>
-                        {n.online ? "运行中" : "等待心跳"}
-                      </Badge>
+                    <td>{formatBytes(node.upload_bytes)}</td>
+                    <td>{formatBytes(node.download_bytes)}</td>
+                    <td>{node.last_used_date ?? "这段时间暂无流量"}</td>
+                    <td className="mb-custom-meta">
+                      {node.pool_names.length
+                        ? node.pool_names.join(" / ")
+                        : "独立节点"}
                     </td>
                   </tr>
                 ))}
@@ -421,12 +472,8 @@ function Nodes() {
           </div>
         ) : (
           <EmptyState
-            title={search ? "调整搜索关键词" : "等待分配连接入口"}
-            description={
-              search
-                ? "用节点名称、地址或协议搜索。"
-                : "管理员接入节点并分配访问组后，可在这里选择连接入口。"
-            }
+            title="等待分配节点"
+            description="管理员接入节点并分配访问组后，你的用量会显示在这里。"
           />
         )}
       </Card>

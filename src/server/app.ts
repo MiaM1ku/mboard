@@ -5,7 +5,8 @@ import { isIP } from 'node:net';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, setRuntimeEntryIPs, RuntimeCompileError } from './runtime';
 import { initializeTrafficReports, getReportSettings, saveReportSettings, buildPreview as buildTrafficReportPreview, enqueueReport, listReportRuns, recordReportTraffic, ReportError } from './traffic-reports';
-import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, renderShareLinks, selectSubscriptionFormat, TemplateValidationError, validateEntryIPs, EntryIPError, type SubscriptionEndpoint } from './subscriptions';
+import { initializeTrafficPools, recordHourlyTraffic, listPools, savePool, deletePool, poolUsage, userPoolStatus, nodeUsage, dateRange, dailyTotals, userDailyTotals, activeUsers, nodeTrafficTotals, userNodeTraffic, userTrafficTotals, PoolError } from './traffic-pools';
+import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, renderShareLinks, selectSubscriptionFormat, TemplateValidationError, validateEntryIPs, validateEntryStrategy, EntryIPError, type EntryStrategy, type SubscriptionEndpoint } from './subscriptions';
 
 // Parse an authority, not a URL: URL parsers silently repair several invalid Host values.
 function hostName(authority: string): string | undefined {
@@ -88,7 +89,7 @@ export function createApp(options: AppOptions = {}) {
   for (const value of [accountLimit,peerLimit]) if (!Number.isSafeInteger(value) || value < 1 || value > 1000000) throw new Error('Login limits must be integers from 1 to 1000000');
   const db = openDatabase(options.dbPath);
   const now = options.now ?? (() => new Date());
-  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`);initializeTrafficReports(db,{now:now()}); }
+  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`);initializeTrafficReports(db,{now:now()});initializeTrafficPools(db); }
   const stamp = () => now().toISOString();
   const get = (sql: string, ...args: any[]): Row | null => db.query(sql).get(...args) as Row | null;
   const all = (sql: string, ...args: any[]): Row[] => db.query(sql).all(...args) as Row[];
@@ -108,7 +109,7 @@ export function createApp(options: AppOptions = {}) {
   const online = (m: Row | null) => !!m?.enabled && !!m.last_seen_at && now().getTime() - Date.parse(m.last_seen_at) < 90_000;
   const machineView = (m: Row) => ({ id: m.id, name: m.name, host: m.host, enabled: !!m.enabled, last_seen_at: m.last_seen_at, version: m.version, online: online(m), config_revision: m.config_revision });
   const entryList = (value: unknown) => { try { const parsed = typeof value === 'string' ? JSON.parse(value) : value; return validateEntryIPs(parsed); } catch { return []; } };
-  const nodeView = (n: Row) => ({ id: n.id, name: n.name, host: n.host, port: n.port, protocol: n.protocol, enabled: !!n.enabled, machine_id: n.machine_id, group_ids: groupsFor('node', n.id), tls: !!n.tls, server_name: n.server_name, entry_ips: entryList(n.entry_ips), online: !!n.enabled && online(n.machine_id ? get('SELECT * FROM machines WHERE id=?', n.machine_id) : null), created_at: n.created_at });
+  const nodeView = (n: Row) => ({ id: n.id, name: n.name, host: n.host, port: n.port, protocol: n.protocol, enabled: !!n.enabled, machine_id: n.machine_id, group_ids: groupsFor('node', n.id), tls: !!n.tls, server_name: n.server_name, entry_ips: entryList(n.entry_ips), entry_strategy: n.entry_strategy || 'round-robin', online: !!n.enabled && online(n.machine_id ? get('SELECT * FROM machines WHERE id=?', n.machine_id) : null), created_at: n.created_at });
   const active = (u: Row) => !!u.enabled && (!u.expires_at || Date.parse(u.expires_at) > now().getTime()) && (!u.quota_bytes || u.upload_bytes + u.download_bytes < u.quota_bytes);
   const granted = (uid: number, nid: number) => !!get('SELECT 1 FROM user_groups ug JOIN node_groups ng ON ug.group_id=ng.group_id WHERE ug.user_id=? AND ng.node_id=? LIMIT 1', uid, nid);
   const authorizedNodes = (u: Row) => active(u) ? all(`SELECT DISTINCT n.* FROM nodes n JOIN node_groups ng ON ng.node_id=n.id JOIN user_groups ug ON ug.group_id=ng.group_id LEFT JOIN machines m ON m.id=n.machine_id WHERE ug.user_id=? AND n.enabled=1 AND (n.machine_id IS NULL OR m.enabled=1) ORDER BY n.id`, u.id) : [];
@@ -288,6 +289,7 @@ export function createApp(options: AppOptions = {}) {
               const ledger=get('SELECT upload_bytes,download_bytes FROM runtime_node_traffic WHERE node_id=? AND user_id=? AND date=?',nid,uid,stamp().slice(0,10));if(ledger&&![ledger.upload_bytes+up,ledger.download_bytes+down,ledger.upload_bytes+ledger.download_bytes+up+down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查节点每日字节计数的安全范围');
               recordReportTraffic(db,{source:'runtime',user_id:uid,node_id:nid,profile_id:pid,upload_bytes:up,download_bytes:down,accepted_at:now()});
                run('INSERT INTO runtime_node_traffic(node_id,user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?,?) ON CONFLICT(node_id,user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',nid,uid,stamp().slice(0,10),up,down);
+              recordHourlyTraffic(db,runtimeID,nid,up,down,now());
             }
             let allUp=0,allDown=0;for(const row of all('SELECT upload_bytes,download_bytes FROM users')){allUp+=row.upload_bytes;allDown+=row.download_bytes;if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围')}for(const s of sums.values()){allUp+=s.up;allDown+=s.down}if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围');
             for(const[uid,s]of sums){const day=get('SELECT upload_bytes,download_bytes FROM traffic_daily WHERE user_id=? AND date=?',uid,stamp().slice(0,10));if(day&&![day.upload_bytes+s.up,day.download_bytes+s.down,day.upload_bytes+day.download_bytes+s.up+s.down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查账号每日字节累计的安全范围');run('UPDATE users SET upload_bytes=upload_bytes+?,download_bytes=download_bytes+? WHERE id=?',s.up,s.down,uid);run('INSERT INTO traffic_daily(user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?) ON CONFLICT(user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',uid,stamp().slice(0,10),s.up,s.down)}
@@ -407,7 +409,29 @@ export function createApp(options: AppOptions = {}) {
     }
     if (path === '/api/v1/nodes' && method === 'GET') return json(userNodes(u));
     if (path === '/api/v1/traffic' && method === 'GET') { const raw = url.searchParams.get('days') ?? '30'; if (!/^\d+$/.test(raw)) fail(400, 'VALIDATION', '请填写 1 到 366 天的范围'); return json(traffic(u.id, integer(Number(raw), '天数', 1, 366))); }
-    if (path === '/api/v1/overview' && method === 'GET') return json({ user: userView(u), nodes: userNodes(u), traffic: traffic(u.id), notices: all('SELECT * FROM notices ORDER BY id DESC') });
+    const grantedRuntimeNodes = (u: Row) => { const groups = groupsFor('user', u.id); return runtimeNodeViews(db).filter(node => node.enabled && node.show && node.group_ids.map(Number).some(group => groups.includes(group))); };
+    if (path === '/api/v1/overview' && method === 'GET') {
+      const mine = userNodes(u), granted = grantedRuntimeNodes(u), current = now();
+      const today = current.toISOString().slice(0, 10), monthStart = today.slice(0, 7) + '-01';
+      const perNode = new Map(userNodeTraffic(db, u.id, dateRange(30, current).start, today).map(row => [row.node_id, row.upload_bytes + row.download_bytes]));
+      const names = new Map([...granted.map(node => [node.id, node.name] as [number, string]), ...mine.map(node => [node.id, node.name] as [number, string])]);
+      const ranked = [...perNode.entries()].map(([id, value]) => ({ id, name: names.get(id) ?? `节点 #${id}`, bytes: value })).sort((a, b) => b.bytes - a.bytes);
+      const sum = ranked.reduce((total, node) => total + node.bytes, 0);
+      return json({
+        user: userView(u), nodes: mine, traffic: traffic(u.id), notices: all('SELECT * FROM notices ORDER BY id DESC'),
+        today_bytes: userDailyTotals(db, u.id, today, today),
+        week_bytes: userDailyTotals(db, u.id, dateRange(7, current).start, today),
+        month_bytes: userDailyTotals(db, u.id, monthStart, today),
+        top_nodes: ranked.slice(0, 5).map(node => ({ ...node, share: sum > 0 ? node.bytes / sum : 0 })),
+        pools: userPoolStatus(db, granted.map(node => node.id), current),
+      });
+    }
+    if (path === '/api/v1/me/node-usage' && method === 'GET') {
+      const raw = url.searchParams.get('days') ?? '30';
+      if (!/^\d+$/.test(raw) || ![7, 30, 90].includes(Number(raw))) fail(400, 'VALIDATION', '请选择 7、30 或 90 天');
+      const live = new Set(userNodes(u).map(node => node.id));
+      return json(nodeUsage(db, u.id, Number(raw), now(), grantedRuntimeNodes(u).map(node => ({ id: node.id, name: node.name, available: live.has(node.id) }))));
+    }
     if (['/api/v1/notices','/api/v1/guides'].includes(path) && method === 'GET') return json(all(`SELECT * FROM ${path.endsWith('notices') ? 'notices' : 'guides'} ORDER BY id DESC`));
     if (path === '/api/v1/tickets' && method === 'GET') return json(all('SELECT * FROM tickets WHERE user_id=? ORDER BY id DESC', u.id).map(ticketView));
     if (path === '/api/v1/tickets' && method === 'POST') {
@@ -483,21 +507,52 @@ export function createApp(options: AppOptions = {}) {
         const count = (kind: string) => get('SELECT COUNT(*) count FROM legacy_records WHERE kind=?', kind)!.count;
         return json({ summary: { users: count('v2_user'), nodes: nodes.length, machines: machines.length, groups: count('v2_server_group'), imported_at: imported?.created_at ?? null }, nodes, machines });
       }
+      if (path === '/api/v1/admin/traffic-pools' && method === 'GET') return json(listPools(db, now()));
+      if (path === '/api/v1/admin/traffic-pools' && method === 'POST') {
+        const b = await body(req); pick(b, ['name','kind','quota_bytes','reset_day','billing','visible_to_users','note','sort','calibration_bytes','members']);
+        return json(atomic(() => { ensureSession(); const pool = savePool(db, b, now()); audit(u, 'traffic-pool.create', pool.id); return pool; }), 201);
+      }
+      const poolMatch = path.match(/^\/api\/v1\/admin\/traffic-pools\/(\d+)$/);
+      if (poolMatch) {
+        const id = integer(Number(poolMatch[1]), '流量池 ID', 1);
+        if (method === 'PATCH') {
+          const b = await body(req); pick(b, ['name','kind','quota_bytes','reset_day','billing','visible_to_users','note','sort','calibration_bytes','members']);
+          return json(atomic(() => { ensureSession(); const pool = savePool(db, b, now(), id); audit(u, 'traffic-pool.update', id); return pool; }));
+        }
+        if (method === 'DELETE') return json(atomic(() => { ensureSession(); deletePool(db, id); audit(u, 'traffic-pool.delete', id); return { ok: true }; }));
+        if (method === 'GET') return json(listPools(db, now()).find(pool => pool.id === id) ?? fail(404, 'NOT_FOUND', '请检查这个流量池'));
+        fail(404, 'NOT_FOUND', '请使用流量池的读取、保存或删除操作');
+      }
       if (path === '/api/v1/admin/overview' && method === 'GET') {
+        const rawDays = url.searchParams.get('days') ?? '7';
+        if (!['1','7','30'].includes(rawDays)) fail(400, 'VALIDATION', '请选择 1、7 或 30 天');
+        const days = Number(rawDays);
         const machines = [...all('SELECT * FROM machines ORDER BY last_seen_at DESC,id DESC').map(machineView),...runtimeMachines()];
         const nodes = [...all('SELECT * FROM nodes').map(nodeView),...runtimeNodes()];
         const totals = get('SELECT COUNT(*) users,COALESCE(SUM(enabled),0) enabled_users,COALESCE(SUM(upload_bytes),0) upload_bytes,COALESCE(SUM(download_bytes),0) download_bytes FROM users')!;
-        return json({ ...totals, nodes: nodes.length, online_nodes: nodes.filter(n => n.online).length, machines: machines.length, online_machines: machines.filter(m=>m.online).length, traffic: traffic(null), recent_machines: machines.sort((a,b)=>String(b.last_seen_at||'').localeCompare(String(a.last_seen_at||''))).slice(0, 10) });
+        const range = dateRange(days, now()); const today = now().toISOString().slice(0, 10);
+        const runtimeOnly = runtimeNodes(); const runtimeNames = new Map(runtimeOnly.map(node => [node.id, node.name]));
+        const topNodes = nodeTrafficTotals(db, range.start, range.end).map(row => {
+          const node = runtimeOnly.find(item => item.id === row.node_id);
+          return { id: row.node_id, name: node?.name ?? `节点 #${row.node_id}`, parent_name: node?.parent_id ? runtimeNames.get(node.parent_id) ?? null : null, machine_names: (node?.machine_ids ?? []).map(mid => machines.find(machine => machine.id === mid)?.name ?? `机器 #${mid}`), online: !!node?.online, users: row.users, upload_bytes: row.upload_bytes, download_bytes: row.download_bytes };
+        }).sort((a, b) => (b.upload_bytes + b.download_bytes) - (a.upload_bytes + a.download_bytes));
+        const topUsers = userTrafficTotals(db, range.start, range.end, 10).map(row => {
+          const user = get('SELECT id,name,email,quota_bytes,upload_bytes,download_bytes FROM users WHERE id=?', row.user_id);
+          return { id: row.user_id, name: user?.name ?? `用户 #${row.user_id}`, email: user?.email ?? '', bytes: row.upload_bytes + row.download_bytes, quota_bytes: Number(user?.quota_bytes) || 0, total_bytes: (Number(user?.upload_bytes) || 0) + (Number(user?.download_bytes) || 0) };
+        });
+        return json({ ...totals, nodes: nodes.length, online_nodes: nodes.filter(n => n.online).length, machines: machines.length, online_machines: machines.filter(m=>m.online).length, traffic: traffic(null), recent_machines: machines.sort((a,b)=>String(b.last_seen_at||'').localeCompare(String(a.last_seen_at||''))).slice(0, 10),
+          days, range, today: dailyTotals(db, today, today), month: dailyTotals(db, today.slice(0, 7) + '-01', today), active_users: activeUsers(db, range.start, range.end),
+          pools: listPools(db, now()), top_nodes: topNodes, top_users: topUsers, attention_machines: machines.filter(machine => machine.enabled && !machine.online).slice(0, 10) });
       }
       if (path === '/api/v1/admin/audit' && method === 'GET') return json(all('SELECT * FROM audit ORDER BY id DESC LIMIT 100'));
       if (path === '/api/v1/admin/tickets' && method === 'GET') return json(all('SELECT * FROM tickets ORDER BY id DESC').map(ticketView));
       const runtimeEntries = path.match(/^\/api\/v1\/admin\/runtime-nodes\/(\d+)\/entries$/);
       if (runtimeEntries && method === 'PATCH') {
         const id = integer(Number(runtimeEntries[1]), '记录 ID', 1);
-        const b = await body(req); pick(b, ['entry_ips']);
-        let ips: string[]; try { ips = validateEntryIPs(b.entry_ips); } catch (error) { if (error instanceof EntryIPError) fail(400, 'VALIDATION', error.message); throw error; }
-        if (!setRuntimeEntryIPs(db, id, ips)) fail(404, 'NOT_FOUND', '请检查节点');
-        audit(u, 'runtime-nodes.entries', id); return json({ id, entry_ips: ips });
+        const b = await body(req); pick(b, ['entry_ips', 'entry_strategy']);
+        let ips: string[], strategy: EntryStrategy; try { ips = validateEntryIPs(b.entry_ips); strategy = validateEntryStrategy(b.entry_strategy); } catch (error) { if (error instanceof EntryIPError) fail(400, 'VALIDATION', error.message); throw error; }
+        if (!setRuntimeEntryIPs(db, id, ips, strategy)) fail(404, 'NOT_FOUND', '请检查节点');
+        audit(u, 'runtime-nodes.entries', id); return json({ id, entry_ips: ips, entry_strategy: strategy });
       }
       if (path === '/api/v1/admin/settings') {
         if (method === 'GET') return json(settings());
@@ -533,13 +588,15 @@ export function createApp(options: AppOptions = {}) {
             if (digest) fields.password_hash = digest;
             if (!old) Object.assign(fields,{role:'user',credential:crypto.randomUUID(),subscription_token:secret(),created_at:stamp()});
           } else if (table === 'nodes') {
-            pick(b,['name','host','port','protocol','enabled','machine_id','group_ids','tls','server_name','entry_ips']);
+            pick(b,['name','host','port','protocol','enabled','machine_id','group_ids','tls','server_name','entry_ips','entry_strategy']);
             take('name',v => string(v,'节点名称',100)); take('host',endpoint); take('port',v => integer(v,'端口',1,65535)); take('protocol',v => { if (!['vless','trojan','shadowsocks'].includes(v)) fail(400,'VALIDATION','请选择支持的协议'); return v; });
             take('enabled',v => boolean(v,'启用状态'),1); take('machine_id',v => { if (v === null) return null; const mid = integer(v,'机器 ID',1); if (!get('SELECT id FROM machines WHERE id=?',mid)) fail(400,'VALIDATION','请选择已有的机器'); return mid; },null);
             take('tls',v => boolean(v,'TLS 状态'),1); take('server_name',v => v === '' ? '' : endpoint(v),'');
             if (own(b,'group_ids')) gids = validGroups(b.group_ids); else if (!old) gids = [];
             if (own(b,'entry_ips')) { try { fields.entry_ips = JSON.stringify(validateEntryIPs(b.entry_ips)); } catch (error) { if (error instanceof EntryIPError) fail(400, 'VALIDATION', error.message); throw error; } }
             else if (!old) fields.entry_ips = '[]';
+            if (own(b,'entry_strategy')) { try { fields.entry_strategy = validateEntryStrategy(b.entry_strategy); } catch (error) { if (error instanceof EntryIPError) fail(400, 'VALIDATION', error.message); throw error; } }
+            else if (!old) fields.entry_strategy = 'round-robin';
             const effective = { ...old,...fields };
             if (effective.protocol === 'shadowsocks' && effective.tls) fail(400,'VALIDATION','Shadowsocks 请关闭 TLS，协议本身提供加密');
             if (effective.protocol === 'trojan' && !effective.tls) fail(400,'VALIDATION','Trojan 请开启 TLS 并配置节点证书');
@@ -589,6 +646,7 @@ export function createApp(options: AppOptions = {}) {
       if (error instanceof RuntimeCompileError) response=Response.json({error:{code:'RUNTIME_CONFIG',message:`请核对节点运行配置后重试（${error.code}）`}},{status:409});
       else if (error instanceof ReportError) response=Response.json({error:{code:error.code,message:({INVALID_CONFIG:'请检查 HTTPS 地址、认证头和排行数量后重试。',DNS_FAILED:'请检查 Webhook 域名解析后重试。',PRIVATE_ADDRESS:'请填写可从公网访问的 HTTPS 接收地址。',TIMEOUT:'请检查接收服务连接后重试。',NETWORK_ERROR:'请检查接收服务连接后重试。',HTTP_ERROR:'请检查接收端认证和处理状态后重试。',RESPONSE_TOO_LARGE:'请将接收端响应控制在合理大小。'} as Record<string,string>)[error.code]}},{status:error.status});
       else if (error instanceof TemplateValidationError) response=Response.json({error:{code:'TEMPLATE_VALIDATION',message:error.message}},{status:400});
+      else if (error instanceof PoolError) response=Response.json({error:{code:error.code,message:error.message}},{status:error.status});
       else if (error instanceof ApiError) response = Response.json({error:{code:error.code,message:error.message}},{status:error.status});
       else if (String(error).includes('UNIQUE constraint failed')) response = Response.json({error:{code:'CONFLICT',message:'这条记录或端口已存在，请选择其他值'}},{status:409});
       else if (String(error).includes('FOREIGN KEY constraint failed')) response = Response.json({error:{code:'IN_USE',message:'这条记录还有关联内容，请先处理关联'}},{status:409});

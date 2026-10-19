@@ -10,7 +10,7 @@ export function openDatabase(path = ':memory:') {
   db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`);
   // Numbered, transactionally applied schema migrations. No fixtures or default accounts.
   const version = (db.query('PRAGMA user_version').get() as any).user_version;
-  if (version > 3) throw new Error('Database schema is newer than this server');
+  if (version > 4) throw new Error('Database schema is newer than this server');
   if (version < 1) db.transaction(() => {
     if ((db.query('PRAGMA user_version').get() as any).user_version >= 1) return;
     db.exec(`
@@ -59,6 +59,11 @@ export function openDatabase(path = ':memory:') {
     if ((db.query('PRAGMA user_version').get() as any).user_version >= 3) return;
     if (!db.query("SELECT 1 FROM pragma_table_info('nodes') WHERE name='entry_ips'").get()) db.exec(`ALTER TABLE nodes ADD COLUMN entry_ips TEXT NOT NULL DEFAULT '[]'`);
     db.exec(`PRAGMA user_version=3`);
+  }).immediate();
+  if (version < 4) db.transaction(() => {
+    if ((db.query('PRAGMA user_version').get() as any).user_version >= 4) return;
+    if (!db.query("SELECT 1 FROM pragma_table_info('nodes') WHERE name='entry_strategy'").get()) db.exec(`ALTER TABLE nodes ADD COLUMN entry_strategy TEXT NOT NULL DEFAULT 'round-robin'`);
+    db.exec(`PRAGMA user_version=4`);
   }).immediate();
   return db;
 }

@@ -6,9 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import {
+  EntryIPError,
   getTemplate, initializeSubscriptionTemplates, listTemplates, MAX_TEMPLATE_BYTES,
   renderShareLinks, renderSubscription, saveTemplate, selectSubscriptionFormat, TEMPLATE_NAMES, TemplateValidationError,
-  validateTemplate, type SubscriptionEndpoint, type TemplateName,
+  validateEntryIPs, validateEntryStrategy, validateTemplate, type SubscriptionEndpoint, type TemplateName,
 } from '../src/server/subscriptions';
 
 const databases: Database[] = [], dirs: string[] = [];
@@ -126,7 +127,7 @@ test('each node keeps its own entry IP list', () => {
 test('clients without load-balance receive one node per entry IP', () => {
   const node = endpoint({ name: '🇭🇰Bage', host: 'balance.example.test', entry_ips: ['192.0.2.1', '192.0.2.2'] });
   const sing = JSON.parse(renderSubscription(template('singbox'), [node]).content);
-  expect(sing.outbounds.map((outbound: { tag: string }) => outbound.tag)).toEqual(expect.arrayContaining(['🇭🇰Bage · 1', '🇭🇰Bage · 2']));
+  expect(sing.outbounds.map((outbound: { tag: string }) => outbound.tag)).toEqual(expect.arrayContaining(['🇭🇰Bage 1', '🇭🇰Bage 2']));
   expect(sing.outbounds.filter((outbound: { server?: string }) => outbound.server).map((outbound: { server: string }) => outbound.server).sort()).toEqual(['192.0.2.1', '192.0.2.2']);
   expect(JSON.stringify(sing)).not.toContain('balance.example.test');
   const share = renderShareLinks('shadowrocket', [node]);
@@ -135,6 +136,61 @@ test('clients without load-balance receive one node per entry IP', () => {
   expect(text).toContain('192.0.2.2');
   expect(text).not.toContain('balance.example.test');
   expect(share.node_count).toBe(2);
+});
+test('one entry IP becomes the connection address and keeps a single node', () => {
+  const node = endpoint({ name: '🇭🇰Bage', host: 'balance.example.test', entry_ips: ['192.0.2.1'], entry_strategy: 'consistent-hashing' });
+  const cfg = parse(renderSubscription(template('clashmeta'), [node]).content);
+  expect(cfg.proxies).toHaveLength(1);
+  expect(cfg.proxies[0]).toMatchObject({ name: '🇭🇰Bage', server: '192.0.2.1', sni: 'sni.example.test' });
+  expect(cfg.proxies[0].entry_ips).toBeUndefined();
+  expect(cfg['proxy-groups'].some((group: { type: string }) => group.type === 'load-balance')).toBe(false);
+  const sing = JSON.parse(renderSubscription(template('singbox'), [node]).content);
+  expect(sing.outbounds.filter((outbound: { server?: string }) => outbound.server).map((outbound: { server: string }) => outbound.server)).toEqual(['192.0.2.1']);
+});
+test('entry strategy reaches the load-balance group and members stay hidden', () => {
+  const cfg = parse(renderSubscription(template('clashmeta'), [endpoint({ name: '🇭🇰Bage', entry_ips: ['192.0.2.1', '192.0.2.2'], entry_strategy: 'consistent-hashing' })]).content);
+  const group = cfg['proxy-groups'].find((item: { name: string }) => item.name === '🇭🇰Bage');
+  expect(group).toMatchObject({ type: 'load-balance', strategy: 'consistent-hashing', proxies: ['🇭🇰Bage 1', '🇭🇰Bage 2'] });
+  expect(cfg.proxies.map((proxy: { name: string }) => proxy.name)).toEqual(['🇭🇰Bage 1', '🇭🇰Bage 2']);
+  expect(cfg.proxies.every((proxy: { hidden?: boolean }) => proxy.hidden)).toBe(true);
+});
+test('surge and surfboard spread entry IPs over one load-balance group', () => {
+  const node = endpoint({ name: '🇭🇰Bage', host: 'balance.example.test', entry_ips: ['192.0.2.1', '192.0.2.2'] });
+  const surge = renderSubscription(template('surge'), [node]).content;
+  expect(surge).toContain('🇭🇰Bage = load-balance, 🇭🇰Bage 1, 🇭🇰Bage 2, url=http://cp.cloudflare.com/, interval=300');
+  expect(surge).toContain('🇭🇰Bage 1 = trojan, 192.0.2.1, 443');
+  expect(surge).not.toContain('balance.example.test');
+  const sticky = renderSubscription(template('surge'), [endpoint({ name: '🇭🇰Bage', entry_ips: ['192.0.2.1', '192.0.2.2'], entry_strategy: 'sticky-sessions' })]).content;
+  expect(sticky).toContain('persistent=true');
+  const surfboard = renderSubscription(template('surfboard'), [node]).content;
+  expect(surfboard).toContain('🇭🇰Bage = load-balance, 🇭🇰Bage 1, 🇭🇰Bage 2');
+  expect(surfboard).toContain('🇭🇰Bage 2 = trojan, 192.0.2.2, 443');
+});
+test('filtered template groups list the synthesized entry instead of its members', () => {
+  const content = 'proxies: []\nproxy-groups:\n  - {name: 香港自动, type: url-test, filter: "(?i)🇭🇰|HK"}\n  - {name: 选择, type: select, proxies: ["$proxy_group"]}\nrules: ["MATCH,选择"]\n';
+  const cfg = parse(renderSubscription(template('clashmeta', content), [endpoint({ name: '🇭🇰Bage', entry_ips: ['192.0.2.1', '192.0.2.2'] })]).content);
+  expect(cfg['proxy-groups'][0].proxies).toEqual(['🇭🇰Bage']);
+  expect(cfg['proxy-groups'][1].proxies).toEqual(['🇭🇰Bage']);
+});
+test('CN relay provider carries entry members behind the front dialer', () => {
+  const front = { name: 'CN HTTP', type: 'http', server: '192.0.2.9', port: 443 };
+  const source = JSON.stringify({ proxies: [front], 'x-mboard-dialer-proxy': { front: 'CN前置', group: 'CN中转', provider: 'cn-relay' }, 'proxy-groups': [{ name: '总模式', type: 'select', proxies: ['节点选择', 'CN中转', 'DIRECT'] }, { name: 'CN前置', type: 'select', proxies: ['DIRECT', 'CN HTTP'] }, { name: 'CN中转', type: 'select', proxies: [], use: ['cn-relay'] }, { name: '节点选择', type: 'select', proxies: [] }], rules: ['MATCH,总模式'] });
+  const cfg = parse(renderSubscription(template('clashmeta', source), [endpoint({ name: 'JP exit', entry_ips: ['198.51.100.1', '198.51.100.2'] })]).content);
+  const provider = cfg['proxy-providers']['cn-relay'];
+  expect(provider.payload.map((proxy: { name: string }) => proxy.name)).toEqual(['JP exit 1', 'JP exit 2']);
+  expect(provider.payload.map((proxy: { server: string }) => proxy.server)).toEqual(['198.51.100.1', '198.51.100.2']);
+  expect(provider.override).toEqual({ 'dialer-proxy': 'CN前置' });
+});
+test('entry validation accepts one to sixteen addresses and rejects hostnames', () => {
+  expect(validateEntryIPs([])).toEqual([]);
+  expect(validateEntryIPs([' 192.0.2.1 ', '2001:db8::1'])).toEqual(['192.0.2.1', '2001:db8::1']);
+  expect(validateEntryIPs(Array.from({ length: 16 }, (_, index) => `192.0.2.${index + 1}`))).toHaveLength(16);
+  for (const value of [['balance.example.test'], ['192.0.2.1', '192.0.2.1'], Array.from({ length: 17 }, (_, index) => `192.0.2.${index + 1}`), [1], '192.0.2.1']) {
+    expect(() => validateEntryIPs(value)).toThrow(EntryIPError);
+  }
+  expect(validateEntryStrategy(undefined)).toBe('round-robin');
+  expect(validateEntryStrategy('sticky-sessions')).toBe('sticky-sessions');
+  expect(() => validateEntryStrategy('random')).toThrow(EntryIPError);
 });
 test('six archived original records seed before defaults, including names, IDs, timestamps and exact bytes', () => {
   const db = database(); legacy(db, synthetic); initializeSubscriptionTemplates(db);

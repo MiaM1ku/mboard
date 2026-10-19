@@ -18,6 +18,9 @@ import type {
   Ticket,
   Group,
   AdminOverview,
+  TrafficPool,
+  PoolKind,
+  PoolStatus,
 } from "./types";
 import {
   Button,
@@ -31,6 +34,7 @@ import {
   EmptyState,
   ErrorState,
   Modal,
+  ShareBar,
   useToast,
 } from "./ui";
 import { TrafficChart } from "./TrafficChart";
@@ -516,22 +520,120 @@ function CrudPage<T extends WithId, D>({
   );
 }
 
+const POOL_KIND_LABEL: Record<PoolKind, string> = {
+  entry: "入口池",
+  exit: "出口池",
+  node: "独立节点",
+};
+const POOL_STATUS_LABEL: Record<PoolStatus, string> = {
+  ok: "正常",
+  warning: "接近上限",
+  exceeded: "已超额度",
+};
+const POOL_STATUS_TONE: Record<PoolStatus, "success" | "warning" | "danger"> = {
+  ok: "success",
+  warning: "warning",
+  exceeded: "danger",
+};
+function PoolCard({
+  pool,
+  onOpen,
+}: {
+  pool: TrafficPool;
+  onOpen: () => void;
+}) {
+  const usage = pool.usage;
+  const percent = Math.min(100, usage.percent);
+  return (
+    <article className="mb-custom-pool-card">
+      <div className="mb-custom-pool-head">
+        <div>
+          <h3>{pool.name}</h3>
+          <span className="mb-custom-meta">
+            {POOL_KIND_LABEL[pool.kind]} · {pool.members.length} 个成员
+          </span>
+        </div>
+        <Badge tone={POOL_STATUS_TONE[usage.status]}>
+          {POOL_STATUS_LABEL[usage.status]}
+        </Badge>
+      </div>
+      <div className="mb-custom-pool-figure">
+        <strong>{formatBytes(usage.used_bytes)}</strong>
+        <span className="muted"> / {formatBytes(usage.quota_bytes)}</span>
+      </div>
+      <div
+        className="usage-track"
+        role="progressbar"
+        aria-label={`${pool.name} 用量`}
+        aria-valuenow={Math.round(percent)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <span
+          className={`is-${usage.status}`}
+          style={{ width: `${Math.max(1, percent)}%` }}
+        />
+      </div>
+      <p className="mb-custom-meta">
+        剩余 {formatBytes(usage.remaining_bytes)} · {usage.cycle_end.slice(5)}{" "}
+        重置 · 还有 {usage.days_left} 天
+      </p>
+      {usage.projected_bytes != null && (
+        <p
+          className={
+            usage.projected_bytes > usage.quota_bytes
+              ? "text-danger"
+              : "mb-custom-meta"
+          }
+        >
+          按现在速度，周期末约 {formatBytes(usage.projected_bytes)}
+        </p>
+      )}
+      {usage.warnings.map((warning) => (
+        <p className="mb-custom-meta" key={warning.code}>
+          {warning.message}
+        </p>
+      ))}
+      <Button variant="ghost" size="small" onClick={onOpen}>
+        调整额度
+      </Button>
+    </article>
+  );
+}
+function trafficTotal(value: { upload_bytes: number; download_bytes: number }) {
+  return value.upload_bytes + value.download_bytes;
+}
 function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
-  const overview = useResource<AdminOverview>(`${ROOT}/overview`);
+  const [days, setDays] = useState("7");
+  const overview = useResource<AdminOverview>(`${ROOT}/overview?days=${days}`);
+  const [showAllNodes, setShowAllNodes] = useState(false);
   return (
     <>
       <PageHeader
         title="运行概览"
         eyebrow="管理工作台"
-        description="查看账户规模、连接状态和实际流量，快速进入日常管理。"
+        description="看今天的流量、每个流量池的余量、节点用量和需要处理的机器。"
         actions={
-          <Button
-            variant="secondary"
-            onClick={overview.reload}
-            disabled={overview.loading}
-          >
-            刷新数据
-          </Button>
+          <div className="mb-custom-actions">
+            <label>
+              <Select
+                aria-label="统计区间"
+                value={days}
+                onChange={(event) => setDays(event.target.value)}
+              >
+                <option value="1">今天</option>
+                <option value="7">最近 7 天</option>
+                <option value="30">最近 30 天</option>
+              </Select>
+            </label>
+            <Button
+              variant="secondary"
+              onClick={overview.reload}
+              disabled={overview.loading}
+            >
+              刷新数据
+            </Button>
+          </div>
         }
       />
       <ResourceView resource={overview}>
@@ -540,12 +642,41 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
             <div className="kpi-grid">
               <Card>
                 <div className="card-body">
-                  <div className="mb-custom-meta">账户</div>
+                  <div className="mb-custom-meta">今日流量</div>
                   <div className="kpi-value">
-                    <AnimatedValue value={data.users} format={count} />
+                    <AnimatedValue
+                      value={trafficTotal(data.today)}
+                      format={formatBytes}
+                    />
                   </div>
                   <p className="mb-custom-stat-note">
-                    {count(data.enabled_users)} 个启用账户
+                    上传 {formatBytes(data.today.upload_bytes)} · 下载{" "}
+                    {formatBytes(data.today.download_bytes)}
+                  </p>
+                </div>
+              </Card>
+              <Card>
+                <div className="card-body">
+                  <div className="mb-custom-meta">本月流量</div>
+                  <div className="kpi-value">
+                    <AnimatedValue
+                      value={trafficTotal(data.month)}
+                      format={formatBytes}
+                    />
+                  </div>
+                  <p className="mb-custom-stat-note">
+                    本月累计，按 UTC 日期统计
+                  </p>
+                </div>
+              </Card>
+              <Card>
+                <div className="card-body">
+                  <div className="mb-custom-meta">活跃用户</div>
+                  <div className="kpi-value">
+                    <AnimatedValue value={data.active_users} format={count} />
+                  </div>
+                  <p className="mb-custom-stat-note">
+                    {count(data.enabled_users)} 个启用账户 · 区间内有流量
                   </p>
                   <Button
                     variant="ghost"
@@ -558,12 +689,13 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
               </Card>
               <Card>
                 <div className="card-body">
-                  <div className="mb-custom-meta">节点</div>
+                  <div className="mb-custom-meta">节点在线</div>
                   <div className="kpi-value">
-                    <AnimatedValue value={data.nodes} format={count} />
+                    <AnimatedValue value={data.online_nodes} format={count} />
+                    <span className="muted"> / {count(data.nodes)}</span>
                   </div>
                   <p className="mb-custom-stat-note">
-                    {count(data.online_nodes)} 个在线节点
+                    机器 {count(data.online_machines)} / {count(data.machines)} 在线
                   </p>
                   <Button
                     variant="ghost"
@@ -574,111 +706,579 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                   </Button>
                 </div>
               </Card>
-              <Card>
-                <div className="card-body">
-                  <div className="mb-custom-meta">机器</div>
-                  <div className="kpi-value">
-                    <AnimatedValue value={data.machines} format={count} />
-                  </div>
-                  <p className="mb-custom-stat-note">
-                    {count(data.online_machines)} 台在线机器
-                  </p>
-                  <Button
-                    variant="ghost"
-                    size="small"
-                    onClick={() => onNavigate("machines")}
-                  >
-                    管理机器 →
-                  </Button>
-                </div>
-              </Card>
-              <Card>
-                <div className="card-body">
-                  <div className="mb-custom-meta">累计流量</div>
-                  <div className="kpi-value">
-                    <AnimatedValue
-                      value={data.upload_bytes + data.download_bytes}
-                      format={formatBytes}
-                    />
-                  </div>
-                  <p className="mb-custom-stat-note">
-                    上传 {formatBytes(data.upload_bytes)} · 下载{" "}
-                    {formatBytes(data.download_bytes)}
-                  </p>
-                </div>
-              </Card>
             </div>
-            <TrafficChart
-              data={data.traffic as TrafficPoint[]}
-              title="流量趋势"
-              description="按 UTC 日期查看上传和下载用量。"
-            />
             <Card>
               <div className="card-header mb-custom-toolbar">
                 <div>
-                  <h2>最近连接的机器</h2>
-                  <p className="mb-custom-meta">
-                    从心跳记录了解连接和配置状态。
-                  </p>
+                  <h2>流量池</h2>
+                  <p>服务商给的周期额度，按节点上报的流量估算。</p>
                 </div>
                 <Button
                   variant="secondary"
                   size="small"
-                  onClick={() => onNavigate("machines")}
+                  onClick={() => onNavigate("pools")}
                 >
-                  查看机器
+                  管理流量池
                 </Button>
               </div>
-              {data.recent_machines.length ? (
-                <Table
-                  rows={data.recent_machines}
-                  columns={[
-                    {
-                      label: "机器",
-                      render: (machine) => (
-                        <>
-                          <strong>{machine.name}</strong>
-                          <div className="mb-custom-meta mono">
-                            {machine.host}
-                          </div>
-                        </>
-                      ),
-                    },
-                    {
-                      label: "连接状态",
-                      render: (machine) => <Online value={machine.online} />,
-                    },
-                    {
-                      label: "最近心跳",
-                      render: (machine) =>
-                        machine.last_seen_at
-                          ? formatDate(machine.last_seen_at)
-                          : "等待首次心跳",
-                    },
-                    {
-                      label: "配置版本",
-                      render: (machine) => (
-                        <span className="mono">{machine.config_revision}</span>
-                      ),
-                    },
-                  ]}
-                />
+              {data.pools.length ? (
+                <div className="card-body mb-custom-pool-grid">
+                  {data.pools.map((pool) => (
+                    <PoolCard
+                      key={pool.id}
+                      pool={pool}
+                      onOpen={() => onNavigate("pools")}
+                    />
+                  ))}
+                </div>
               ) : (
                 <EmptyState
-                  title="连接第一台机器"
-                  description="创建机器获取接入令牌，然后运行节点服务上报心跳。"
+                  title="建立第一个流量池"
+                  description="填上服务商给的额度和重置日，就能在这里看到每个池的余量。"
                   action={
-                    <Button onClick={() => onNavigate("machines")}>
-                      创建机器
+                    <Button onClick={() => onNavigate("pools")}>
+                      建立流量池
                     </Button>
                   }
                 />
+              )}
+            </Card>
+            <div className="dashboard-grid">
+              <div className="section-stack">
+                <TrafficChart
+                  data={data.traffic as TrafficPoint[]}
+                  title="近 30 天流量"
+                  description="按 UTC 日期查看上传和下载用量。"
+                />
+              </div>
+              <div className="section-stack">
+                <Card>
+                  <div className="card-header mb-custom-toolbar">
+                    <div>
+                      <h2>需要处理</h2>
+                      <p>启用了但还没上报心跳的机器。</p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="small"
+                      onClick={() => onNavigate("machines")}
+                    >
+                      查看机器
+                    </Button>
+                  </div>
+                  {data.attention_machines.length ? (
+                    <div className="card-body mb-custom-record-list">
+                      {data.attention_machines.map((machine) => (
+                        <div
+                          className="mb-custom-record"
+                          key={machine.id}
+                        >
+                          <div className="mb-custom-record-heading">
+                            <strong>{machine.name}</strong>
+                            <Badge tone="warning">等待心跳</Badge>
+                          </div>
+                          <span className="mb-custom-meta mono">
+                            {machine.host}
+                          </span>
+                          <span className="mb-custom-meta">
+                            {machine.last_seen_at
+                              ? `最近心跳 ${formatDate(machine.last_seen_at)}`
+                              : "等待首次心跳"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="card-body">
+                      <p className="mb-custom-meta">
+                        {count(data.machines)} 台机器都在线。
+                      </p>
+                    </div>
+                  )}
+                </Card>
+                <Card>
+                  <div className="card-header">
+                    <div>
+                      <h2>用户用量</h2>
+                      <p>所选区间里用流量最多的账户。</p>
+                    </div>
+                  </div>
+                  {data.top_users.length ? (
+                    <div className="table-wrap">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>用户</th>
+                            <th>区间用量</th>
+                            <th>累计 / 额度</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {data.top_users.map((user) => (
+                            <tr key={user.id}>
+                              <td>
+                                <strong>{user.name}</strong>
+                                <div className="mb-custom-meta">
+                                  {user.email}
+                                </div>
+                              </td>
+                              <td>{formatBytes(user.bytes)}</td>
+                              <td>
+                                {formatBytes(user.total_bytes)}
+                                {user.quota_bytes > 0
+                                  ? ` / ${formatBytes(user.quota_bytes)}`
+                                  : " · 按实际用量累计"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="card-body">
+                      <p className="mb-custom-meta">
+                        所选区间里暂无账户流量。
+                      </p>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            </div>
+            <Card>
+              <div className="card-header mb-custom-toolbar">
+                <div>
+                  <h2>节点用量</h2>
+                  <p>所选区间里每个节点承载的流量，含入口和出口。</p>
+                </div>
+                {data.top_nodes.length > 10 && (
+                  <Button
+                    variant="secondary"
+                    size="small"
+                    onClick={() => setShowAllNodes((value) => !value)}
+                  >
+                    {showAllNodes
+                      ? "收起"
+                      : `查看全部 ${data.top_nodes.length} 个`}
+                  </Button>
+                )}
+              </div>
+              {data.top_nodes.length ? (
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>节点</th>
+                        <th>服务器</th>
+                        <th>状态</th>
+                        <th>用户</th>
+                        <th>上传</th>
+                        <th>下载</th>
+                        <th>合计</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(showAllNodes
+                        ? data.top_nodes
+                        : data.top_nodes.slice(0, 10)
+                      ).map((node) => {
+                        const total = node.upload_bytes + node.download_bytes;
+                        const sum = data.top_nodes.reduce(
+                          (value, item) =>
+                            value + item.upload_bytes + item.download_bytes,
+                          0,
+                        );
+                        return (
+                          <tr key={node.id}>
+                            <td>
+                              <strong>{node.name}</strong>
+                              {node.parent_name && (
+                                <div className="mb-custom-meta">
+                                  入口 {node.parent_name}
+                                </div>
+                              )}
+                            </td>
+                            <td className="mb-custom-meta">
+                              {node.machine_names.length
+                                ? node.machine_names.join(" / ")
+                                : "待关联"}
+                            </td>
+                            <td>
+                              <Badge
+                                tone={node.online ? "success" : "warning"}
+                              >
+                                {node.online ? "在线" : "等待心跳"}
+                              </Badge>
+                            </td>
+                            <td>{count(node.users)}</td>
+                            <td>{formatBytes(node.upload_bytes)}</td>
+                            <td>{formatBytes(node.download_bytes)}</td>
+                            <td>
+                              <div className="mb-custom-share">
+                                <span>{formatBytes(total)}</span>
+                                <ShareBar
+                                  share={sum > 0 ? total / sum : 0}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="card-body">
+                  <p className="mb-custom-meta">
+                    所选区间里暂无节点流量。
+                  </p>
+                </div>
               )}
             </Card>
           </>
         )}
       </ResourceView>
     </>
+  );
+}
+
+type PoolDraft = {
+  name: string;
+  kind: PoolKind;
+  quota_amount: string;
+  quota_unit: QuotaUnit;
+  reset_day: string;
+  billing: "single" | "double";
+  visible_to_users: boolean;
+  note: string;
+  calibration_amount: string;
+  calibration_unit: QuotaUnit;
+  clear_calibration: boolean;
+  members: string[];
+};
+function PoolsPage() {
+  const pools = useResource<TrafficPool[]>(`${ROOT}/traffic-pools`);
+  const nodes = useResource<Node[]>(`${ROOT}/nodes`);
+  const machines = useResource<Machine[]>(`${ROOT}/machines`);
+  const splitBytes = (bytes: number | null) => {
+    if (bytes == null) return { amount: "", unit: "GB" as QuotaUnit };
+    const parts = quotaParts(bytes);
+    return { amount: parts.quota_amount, unit: parts.quota_unit as QuotaUnit };
+  };
+  return (
+    <CrudPage<TrafficPool, PoolDraft>
+      title="流量池"
+      description="按服务商给的周期额度记录每个入口池、出口池和独立节点，随时看到剩余量。"
+      singular="流量池"
+      endpoint={`${ROOT}/traffic-pools`}
+      resource={pools}
+      search={(pool) => `${pool.name} ${POOL_KIND_LABEL[pool.kind]} ${pool.members.map((member) => member.name).join(" ")}`}
+      label={(pool) => pool.name}
+      createDraft={() => ({
+        name: "",
+        kind: "entry",
+        quota_amount: "",
+        quota_unit: "TB",
+        reset_day: "1",
+        billing: "single",
+        visible_to_users: true,
+        note: "",
+        calibration_amount: "",
+        calibration_unit: "GB",
+        clear_calibration: false,
+        members: [],
+      })}
+      editDraft={(pool) => {
+        const quota = splitBytes(pool.quota_bytes);
+        const calibration = splitBytes(pool.calibration_bytes);
+        return {
+          name: pool.name,
+          kind: pool.kind,
+          quota_amount: quota.amount,
+          quota_unit: quota.unit,
+          reset_day: String(pool.reset_day),
+          billing: pool.billing,
+          visible_to_users: pool.visible_to_users,
+          note: pool.note,
+          calibration_amount: calibration.amount,
+          calibration_unit: calibration.unit,
+          clear_calibration: false,
+          members: pool.members.map((member) => `${member.type}:${member.id}`),
+        };
+      }}
+      payload={(draft) => {
+        const quota = quotaBytes(draft.quota_amount, draft.quota_unit);
+        const calibration = draft.calibration_amount.trim()
+          ? quotaBytes(draft.calibration_amount, draft.calibration_unit)
+          : null;
+        return {
+          name: draft.name.trim(),
+          kind: draft.kind,
+          quota_bytes: quota,
+          reset_day: Number(draft.reset_day),
+          billing: draft.billing,
+          visible_to_users: draft.visible_to_users,
+          note: draft.note.trim(),
+          members: draft.members.map((key) => {
+            const [type, id] = key.split(":");
+            return { type, id: Number(id) };
+          }),
+          ...(draft.clear_calibration
+            ? { calibration_bytes: null }
+            : calibration != null
+              ? { calibration_bytes: calibration }
+              : {}),
+        };
+      }}
+      validate={(draft) => {
+        if (!draft.name.trim()) return "请填写流量池名称。";
+        if (!Number.isSafeInteger(quotaBytes(draft.quota_amount, draft.quota_unit)))
+          return "请填写能换成整数字节的额度。";
+        const day = Number(draft.reset_day);
+        if (!Number.isInteger(day) || day < 1 || day > 31)
+          return "重置日请填写 1 到 31 之间的数字。";
+        if (!draft.members.length) return "请选择至少一个节点或服务器。";
+        return "";
+      }}
+      saveBlocked={
+        nodes.loading ||
+        !!nodes.error ||
+        machines.loading ||
+        !!machines.error
+      }
+      consequences={() =>
+        "删除只移除这个池的额度和成员设置，已经上报的流量记录继续保留。"
+      }
+      columns={[
+        {
+          label: "流量池",
+          render: (pool) => (
+            <>
+              <strong>{pool.name}</strong>
+              <div className="mb-custom-meta">
+                {POOL_KIND_LABEL[pool.kind]} ·{" "}
+                {pool.billing === "double" ? "双向计费" : "单向计费"}
+              </div>
+            </>
+          ),
+        },
+        {
+          label: "用量",
+          render: (pool) => (
+            <div className="mb-custom-share">
+              <span>
+                {formatBytes(pool.usage.used_bytes)} /{" "}
+                {formatBytes(pool.usage.quota_bytes)}
+              </span>
+              <ShareBar share={pool.usage.percent / 100} />
+            </div>
+          ),
+        },
+        {
+          label: "周期",
+          render: (pool) => (
+            <>
+              <span>{pool.usage.cycle_end} 重置</span>
+              <div className="mb-custom-meta">
+                还有 {pool.usage.days_left} 天
+                {pool.usage.calibrated ? " · 已校准" : ""}
+              </div>
+            </>
+          ),
+        },
+        {
+          label: "状态",
+          render: (pool) => (
+            <Badge tone={POOL_STATUS_TONE[pool.usage.status]}>
+              {POOL_STATUS_LABEL[pool.usage.status]}
+            </Badge>
+          ),
+        },
+        {
+          label: "成员",
+          render: (pool) => (
+            <>
+              <span>{pool.members.length} 个</span>
+              <div className="mb-custom-meta">
+                {pool.members.slice(0, 3).map((member) => member.name).join(" / ")}
+                {pool.members.length > 3 ? " …" : ""}
+              </div>
+            </>
+          ),
+        },
+      ]}
+      fields={(draft, update) => (
+        <>
+          <Field label="流量池名称" hint="写服务商和线路，例如 腾讯IX 或 BageHK。">
+            <Input
+              required
+              maxLength={60}
+              value={draft.name}
+              onChange={(event) => update({ name: event.target.value })}
+            />
+          </Field>
+          <Field label="类型" hint="入口池、出口池和独立节点只是分组标签。">
+            <Select
+              value={draft.kind}
+              onChange={(event) =>
+                update({ kind: event.target.value as PoolKind })
+              }
+            >
+              <option value="entry">入口池</option>
+              <option value="exit">出口池</option>
+              <option value="node">独立节点</option>
+            </Select>
+          </Field>
+          <Field label="周期额度" hint="按服务商账单填，例如 3 TB。">
+            <Input
+              required
+              type="number"
+              min="0"
+              step="any"
+              value={draft.quota_amount}
+              onChange={(event) =>
+                update({ quota_amount: event.target.value })
+              }
+            />
+          </Field>
+          <Field label="额度单位">
+            <Select
+              value={draft.quota_unit}
+              onChange={(event) =>
+                update({ quota_unit: event.target.value as QuotaUnit })
+              }
+            >
+              <option value="GB">GB</option>
+              <option value="TB">TB</option>
+            </Select>
+          </Field>
+          <Field label="重置日" hint="每月几号清零，按上海时间。短月取月末那天。">
+            <Input
+              required
+              type="number"
+              min="1"
+              max="31"
+              value={draft.reset_day}
+              onChange={(event) => update({ reset_day: event.target.value })}
+            />
+          </Field>
+          <Field
+            label="计费方式"
+            hint="服务商把进和出两个方向合计时选双向，面板按两倍计算。"
+          >
+            <Select
+              value={draft.billing}
+              onChange={(event) =>
+                update({ billing: event.target.value as "single" | "double" })
+              }
+            >
+              <option value="single">单向（按实际流量）</option>
+              <option value="double">双向（进和出合计）</option>
+            </Select>
+          </Field>
+          <CheckField label="用户可见">
+            <Check
+              label="在用户概览显示剩余百分比"
+              checked={draft.visible_to_users}
+              onChange={(visible_to_users) => update({ visible_to_users })}
+            />
+          </CheckField>
+          <div className="mb-custom-field-wide">
+            <CheckField label="成员">
+              <div className="mb-custom-section-stack">
+                <p className="field-hint">
+                  按节点上报的流量记账。旧版接入的机器和节点先照常显示，接入运行节点后开始记录用量。
+                </p>
+                <div>
+                  <span className="mb-custom-meta">服务器</span>
+                  <div className="mb-custom-checkbox-group">
+                    {(machines.data ?? []).map((machine) => (
+                      <Check
+                        key={`machine:${machine.id}`}
+                        label={`${machine.name} · ${machine.host}`}
+                        checked={draft.members.includes(`machine:${machine.id}`)}
+                        onChange={(checked) =>
+                          update({
+                            members: checked
+                              ? [...draft.members, `machine:${machine.id}`]
+                              : draft.members.filter(
+                                  (key) => key !== `machine:${machine.id}`,
+                                ),
+                          })
+                        }
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <span className="mb-custom-meta">节点</span>
+                  <div className="mb-custom-checkbox-group">
+                    {(nodes.data ?? []).map((node) => (
+                      <Check
+                        key={`node:${node.id}`}
+                        label={`${node.name}${node.parent_id ? ` · 入口 ${node.parent_id}` : ""}`}
+                        checked={draft.members.includes(`node:${node.id}`)}
+                        onChange={(checked) =>
+                          update({
+                            members: checked
+                              ? [...draft.members, `node:${node.id}`]
+                              : draft.members.filter(
+                                  (key) => key !== `node:${node.id}`,
+                                ),
+                          })
+                        }
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </CheckField>
+          </div>
+          <Field
+            label="校准已用量"
+            hint="填服务商面板显示的本周期已用量。周期翻页后自动失效。"
+          >
+            <Input
+              type="number"
+              min="0"
+              step="any"
+              placeholder="留空表示按上报流量计算"
+              value={draft.calibration_amount}
+              onChange={(event) =>
+                update({ calibration_amount: event.target.value })
+              }
+            />
+          </Field>
+          <Field label="校准单位">
+            <Select
+              value={draft.calibration_unit}
+              onChange={(event) =>
+                update({ calibration_unit: event.target.value as QuotaUnit })
+              }
+            >
+              <option value="GB">GB</option>
+              <option value="TB">TB</option>
+            </Select>
+          </Field>
+          <CheckField label="校准选项">
+            <Check
+              label="清除现有校准值"
+              checked={draft.clear_calibration}
+              onChange={(clear_calibration) => update({ clear_calibration })}
+            />
+          </CheckField>
+          <div className="mb-custom-field-wide">
+            <Field label="备注">
+              <Textarea
+                rows={3}
+                maxLength={500}
+                value={draft.note}
+                onChange={(event) => update({ note: event.target.value })}
+              />
+            </Field>
+          </div>
+        </>
+      )}
+    />
   );
 }
 
@@ -923,7 +1523,110 @@ type NodeDraft = {
   tls: boolean;
   server_name: string;
   entry_ips: string[];
+  entry_strategy: string;
 };
+const ENTRY_STRATEGY_OPTIONS = [
+  { value: "round-robin", label: "轮询（每个连接换一个入口）" },
+  { value: "consistent-hashing", label: "按目标固定（同一个网站走同一个入口）" },
+  { value: "sticky-sessions", label: "按来源固定（同一个会话走同一个入口）" },
+] as const;
+const ENTRY_STRATEGY_LABEL: Record<string, string> = {
+  "round-robin": "轮询",
+  "consistent-hashing": "按目标固定",
+  "sticky-sessions": "按来源固定",
+};
+const ENTRY_HINT =
+  "填写客户端连接用的 IP，可以填 1 到 16 个。支持负载均衡的客户端会把它们合成一个节点；其他客户端会显示为“节点名 1”“节点名 2”。留空时使用服务地址。";
+function entrySummary(node: Node) {
+  const ips = node.entry_ips ?? [];
+  if (!ips.length) return `${node.host}:${node.port}`;
+  if (ips.length === 1) return `入口 ${ips[0]}`;
+  return `入口 ${ips.length} 个 · ${ENTRY_STRATEGY_LABEL[node.entry_strategy ?? "round-robin"] ?? "轮询"}`;
+}
+function entryListError(ips: string[]) {
+  const list = ips.map((ip) => ip.trim()).filter(Boolean);
+  if (list.length > 16) return "最多填写 16 个 IP。";
+  if (new Set(list).size !== list.length) return "每个 IP 填写一次。";
+  return "";
+}
+function EntryEditor({
+  ips,
+  strategy,
+  onChange,
+  ariaLabel,
+  disabled,
+  compact,
+}: {
+  ips: string[];
+  strategy: string;
+  onChange: (patch: { entry_ips?: string[]; entry_strategy?: string }) => void;
+  ariaLabel: string;
+  disabled?: boolean;
+  compact?: boolean;
+}) {
+  return (
+    <div className="mb-custom-section-stack">
+      {ips.map((ip, index) => (
+        <div className="mb-custom-actions" key={index}>
+          <Input
+            value={ip}
+            maxLength={45}
+            placeholder="203.0.113.10"
+            aria-label={`${ariaLabel} ${index + 1}`}
+            disabled={disabled}
+            onChange={(event) =>
+              onChange({
+                entry_ips: ips.map((current, currentIndex) =>
+                  currentIndex === index ? event.target.value : current,
+                ),
+              })
+            }
+          />
+          <Button
+            variant="ghost"
+            disabled={disabled}
+            onClick={() =>
+              onChange({
+                entry_ips: ips.filter(
+                  (_, currentIndex) => currentIndex !== index,
+                ),
+              })
+            }
+          >
+            移除
+          </Button>
+        </div>
+      ))}
+      <Button
+        variant="secondary"
+        disabled={disabled}
+        onClick={() => onChange({ entry_ips: [...ips, ""] })}
+      >
+        添加入口
+      </Button>
+      {!compact && ips.filter((ip) => ip.trim()).length >= 2 ? (
+        <Field
+          label="分配方式"
+          hint="客户端按这里的方式把连接分到各个入口。"
+        >
+          <Select
+            value={strategy || "round-robin"}
+            disabled={disabled}
+            onChange={(event) =>
+              onChange({ entry_strategy: event.target.value })
+            }
+          >
+            {ENTRY_STRATEGY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      ) : null}
+    </div>
+  );
+}
 function NodesPage() {
   const nodes = useResource<Node[]>(`${ROOT}/nodes`);
   const machines = useResource<Machine[]>(`${ROOT}/machines`);
@@ -931,10 +1634,12 @@ function NodesPage() {
   const { notify } = useToast();
   const [configNode, setConfigNode] = useState<Node | null>(null);
   const [entryDraft, setEntryDraft] = useState<string[]>([]);
+  const [entryStrategy, setEntryStrategy] = useState("round-robin");
   const [entryBusy, setEntryBusy] = useState(false);
   const [entryError, setEntryError] = useState("");
   useEffect(() => {
     setEntryDraft([...(configNode?.entry_ips ?? [])]);
+    setEntryStrategy(configNode?.entry_strategy ?? "round-robin");
     setEntryError("");
   }, [configNode]);
   return (
@@ -958,6 +1663,7 @@ function NodesPage() {
         tls: true,
         server_name: "",
         entry_ips: [],
+        entry_strategy: "round-robin",
       })}
       editDraft={(node) => ({
         name: node.name,
@@ -970,6 +1676,7 @@ function NodesPage() {
         tls: node.tls,
         server_name: node.server_name,
         entry_ips: [...(node.entry_ips ?? [])],
+        entry_strategy: node.entry_strategy ?? "round-robin",
       })}
       payload={(draft) => ({
         name: draft.name.trim(),
@@ -982,12 +1689,11 @@ function NodesPage() {
         tls: draft.tls,
         server_name: draft.server_name.trim(),
         entry_ips: draft.entry_ips.map((ip) => ip.trim()).filter(Boolean),
+        entry_strategy: draft.entry_strategy,
       })}
       validate={(draft) => {
         if (!draft.group_ids.length) return "选择至少一个访问分组，再保存节点。";
-        const ips = draft.entry_ips.map((ip) => ip.trim()).filter(Boolean);
-        if (ips.length === 1) return "负载均衡入口至少填写两个 IP，或留空。";
-        return "";
+        return entryListError(draft.entry_ips);
       }}
       saveBlocked={
         groups.loading ||
@@ -1016,8 +1722,13 @@ function NodesPage() {
           render: (node) => (
             <>
               <strong>{node.name}</strong>
-              <div className="mb-custom-meta mono">
-                #{node.id} · {(node.entry_ips?.length ?? 0) >= 2 ? node.entry_ips!.join(" / ") : `${node.host}:${node.port}`}
+              <div
+                className="mb-custom-meta mono"
+                title={
+                  node.entry_ips?.length ? node.entry_ips.join(" / ") : undefined
+                }
+              >
+                #{node.id} · {entrySummary(node)}
               </div>
             </>
           ),
@@ -1069,31 +1780,16 @@ function NodesPage() {
             />
           </Field>
           <div className="mb-custom-field-wide">
-            <Field label="负载均衡入口" hint="直接填写两个及以上 IP。支持负载均衡的客户端会合成一个入口，其他客户端会看到多个节点。留空则使用服务地址。">
-              <div className="mb-custom-section-stack">
-                {draft.entry_ips.map((ip, index) => (
-                  <div className="mb-custom-actions" key={index}>
-                    <Input
-                      value={ip}
-                      maxLength={45}
-                      placeholder="192.0.2.1"
-                      aria-label={`入口 IP ${index + 1}`}
-                      onChange={(event) => update({
-                        entry_ips: draft.entry_ips.map((current, currentIndex) => currentIndex === index ? event.target.value : current),
-                      })}
-                    />
-                    <Button variant="ghost" onClick={() => update({ entry_ips: draft.entry_ips.filter((_, currentIndex) => currentIndex !== index) })}>
-                      移除
-                    </Button>
-                  </div>
-                ))}
-                <Button variant="secondary" onClick={() => update({ entry_ips: [...draft.entry_ips, ""] })}>
-                  添加入口
-                </Button>
-              </div>
+            <Field label="连接入口" hint={ENTRY_HINT}>
+              <EntryEditor
+                ips={draft.entry_ips}
+                strategy={draft.entry_strategy}
+                ariaLabel="连接入口 IP"
+                onChange={(patch) => update(patch)}
+              />
             </Field>
           </div>
-          <Field label="服务地址" hint="填写客户端可访问的域名或 IP 地址。填写了负载均衡入口后，订阅不再使用这个域名。">
+          <Field label="服务地址" hint="填写客户端可访问的域名或 IP。填写连接入口后，订阅改用入口 IP 连接。">
             <Input
               required
               maxLength={253}
@@ -1226,7 +1922,7 @@ function NodesPage() {
       open={!!configNode}
       onClose={() => setConfigNode(null)}
       title={configNode ? configNode.name : "运行配置"}
-      description="这是已经接入的运行节点。协议、证书和路由由机器上的配置生成，这里只查看，不改成普通节点。"
+      description="协议、证书和路由来自机器上的配置。这里可以设置连接入口和分配方式。"
       footer={
         <>
           <Button variant="secondary" disabled={entryBusy} onClick={() => setConfigNode(null)}>关闭</Button>
@@ -1236,10 +1932,11 @@ function NodesPage() {
             onClick={async () => {
               if (!configNode) return;
               const entry_ips = entryDraft.map((ip) => ip.trim()).filter(Boolean);
-              if (entry_ips.length === 1) { setEntryError("负载均衡入口至少填写两个 IP，或留空。"); return; }
+              const listError = entryListError(entry_ips);
+              if (listError) { setEntryError(listError); return; }
               setEntryBusy(true); setEntryError("");
               try {
-                await api(`${ROOT}/runtime-nodes/${configNode.id}/entries`, request("PATCH", { entry_ips }));
+                await api(`${ROOT}/runtime-nodes/${configNode.id}/entries`, request("PATCH", { entry_ips, entry_strategy: entryStrategy }));
                 nodes.reload();
                 notify("节点入口已保存", "success");
                 setConfigNode(null);
@@ -1259,26 +1956,17 @@ function NodesPage() {
         <dl className="mb-custom-meta">
           <div>协议：{configNode.protocol.toUpperCase()}</div>
           <div>客户端地址：{configNode.host}:{configNode.port}</div>
-          <Field label="负载均衡入口" hint="直接填写两个及以上 IP。支持负载均衡的客户端会合成一个入口，其他客户端会看到多个节点。">
-            <div className="mb-custom-section-stack">
-              {entryDraft.map((ip, index) => (
-                <div className="mb-custom-actions" key={index}>
-                  <Input
-                    value={ip}
-                    maxLength={45}
-                    placeholder="192.0.2.1"
-                    aria-label={`运行节点入口 IP ${index + 1}`}
-                    onChange={(event) => setEntryDraft((current) => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}
-                  />
-                  <Button variant="ghost" disabled={entryBusy} onClick={() => setEntryDraft((current) => current.filter((_, itemIndex) => itemIndex !== index))}>
-                    移除
-                  </Button>
-                </div>
-              ))}
-              <Button variant="secondary" disabled={entryBusy} onClick={() => setEntryDraft((current) => [...current, ""])}>
-                添加入口
-              </Button>
-            </div>
+          <Field label="连接入口" hint={ENTRY_HINT}>
+            <EntryEditor
+              ips={entryDraft}
+              strategy={entryStrategy}
+              ariaLabel="运行节点入口 IP"
+              disabled={entryBusy}
+              onChange={(patch) => {
+                if (patch.entry_ips) setEntryDraft(patch.entry_ips);
+                if (patch.entry_strategy) setEntryStrategy(patch.entry_strategy);
+              }}
+            />
           </Field>
           {entryError && <ErrorState message={entryError} />}
           {configNode.server_port ? <div>机器监听：{configNode.server_port}</div> : null}
@@ -2255,6 +2943,8 @@ export function AdminPage({
       return <NodesPage />;
     case "machines":
       return <MachinesPage />;
+    case "pools":
+      return <PoolsPage />;
     case "groups":
       return <GroupsPage />;
     case "content":

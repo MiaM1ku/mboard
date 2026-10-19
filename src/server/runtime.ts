@@ -9,13 +9,16 @@ export type RestoreRuntimeOptions = { supplements?: RuntimeSupplement[]; coreVer
 export type TrafficLabel = { label: string; user_id: number; node_id: number };
 export type RuntimeFile = { path_under_mboard_tls: string; content: string; mode: number };
 export type CompiledMachine = { revision: number; config: Row; traffic_labels: TrafficLabel[]; files: RuntimeFile[]; warnings: string[] };
-export type RuntimeEndpoint = { id: number | string; name: string; protocol: string; host: string; port: number; credential: string; settings: Row; native_outbounds?: Row[]; entry_ips?: string[] };
+export type RuntimeEndpoint = { id: number | string; name: string; protocol: string; host: string; port: number; credential: string; settings: Row; native_outbounds?: Row[]; entry_ips?: string[]; entry_strategy?: RuntimeEntryStrategy };
+export type RuntimeEntryStrategy = 'round-robin' | 'consistent-hashing' | 'sticky-sessions';
+export type RuntimeEntry = { entry_ips: string[]; entry_strategy: RuntimeEntryStrategy };
 export class RuntimeCompileError extends Error { constructor(public code: string, public entity: string) { super(`Runtime ${code}: ${entity}`); this.name = 'RuntimeCompileError'; } }
 function fail(code: string, entity: string): never { throw new RuntimeCompileError(code, entity); }
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 const json = (s: any, fallback: any = {}) => { if (s == null || s === '') return fallback; if (typeof s !== 'string') return s; try { return JSON.parse(s); } catch { return fail('invalid-json', 'source field'); } };
 const arr = (s: any): any[] => { const v = json(s, []); return Array.isArray(v) ? v : fail('expected-array', 'source field'); };
 const storedEntryIPs = (value: unknown): string[] => Array.isArray(value) ? value.filter((ip): ip is string => typeof ip === 'string') : [];
+const storedEntryStrategy = (value: unknown): RuntimeEntryStrategy => (['round-robin','consistent-hashing','sticky-sessions'] as const).find(item => item === value) ?? 'round-robin';
 const obj = (s: any): Row => { const v = json(s, {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : fail('expected-object-or-decrypted-supplement', 'source field'); };
 const yes = (s: any, defaultValue = true) => s == null ? defaultValue : ![false, 0, '0', 'false'].includes(s);
 const id = (s: any, entity: string) => Number.isSafeInteger(Number(s)) && Number(s) > 0 ? Number(s) : fail('invalid-id', entity);
@@ -31,9 +34,38 @@ CREATE TABLE IF NOT EXISTS runtime_machines (id INTEGER PRIMARY KEY, state TEXT 
 CREATE TABLE IF NOT EXISTS runtime_bindings (machine_id INTEGER NOT NULL REFERENCES runtime_machines(id), node_id INTEGER NOT NULL REFERENCES runtime_nodes(id), payload TEXT NOT NULL, PRIMARY KEY(machine_id,node_id));
 CREATE TABLE IF NOT EXISTS runtime_identity_credentials (user_id INTEGER NOT NULL, node_id INTEGER NOT NULL, profile_id TEXT NOT NULL DEFAULT '', credential TEXT NOT NULL, PRIMARY KEY(user_id,node_id,profile_id));
 CREATE TABLE IF NOT EXISTS runtime_source_records (kind TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(kind,id));
-CREATE TABLE IF NOT EXISTS runtime_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);`);
+CREATE TABLE IF NOT EXISTS runtime_metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS runtime_node_entries (node_id INTEGER PRIMARY KEY, entry_ips TEXT NOT NULL, entry_strategy TEXT NOT NULL DEFAULT 'round-robin', updated_at TEXT NOT NULL);`);
   const columns=new Set((db.query('PRAGMA table_info(runtime_machines)').all() as Row[]).map(c=>c.name));
   for(const column of ['last_seen_at','version'])if(!columns.has(column))db.exec(`ALTER TABLE runtime_machines ADD COLUMN ${column} TEXT`);
+  migrateRuntimeEntries(db);
+}
+/** Move entry IPs out of the replaced-on-import payload into their own table. Runs once. */
+function migrateRuntimeEntries(db: Database) {
+  if (db.query("SELECT 1 FROM runtime_metadata WHERE key='entries:migrated:v1'").get()) return;
+  db.transaction(() => {
+    if (db.query("SELECT 1 FROM runtime_metadata WHERE key='entries:migrated:v1'").get()) return;
+    const now = new Date().toISOString();
+    for (const row of db.query('SELECT id,payload FROM runtime_nodes').all() as Row[]) {
+      const payload = obj(row.payload);
+      const ips = storedEntryIPs(payload.entry_ips);
+      if (ips.length) db.query('INSERT INTO runtime_node_entries(node_id,entry_ips,entry_strategy,updated_at) VALUES(?,?,?,?) ON CONFLICT(node_id) DO NOTHING').run(Number(row.id), JSON.stringify(ips), storedEntryStrategy(payload.entry_strategy), now);
+      if ('entry_ips' in payload || 'entry_strategy' in payload) {
+        delete payload.entry_ips; delete payload.entry_strategy;
+        db.query('UPDATE runtime_nodes SET payload=? WHERE id=?').run(JSON.stringify(payload), Number(row.id));
+      }
+    }
+    db.query("INSERT INTO runtime_metadata VALUES('entries:migrated:v1',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(now);
+  }).immediate();
+}
+function runtimeEntries(db: Database): Map<number, RuntimeEntry> {
+  const map = new Map<number, RuntimeEntry>();
+  for (const row of db.query('SELECT node_id,entry_ips,entry_strategy FROM runtime_node_entries').all() as Row[]) {
+    let ips: unknown = [];
+    try { ips = JSON.parse(String(row.entry_ips)); } catch { ips = []; }
+    map.set(Number(row.node_id), { entry_ips: storedEntryIPs(ips), entry_strategy: storedEntryStrategy(row.entry_strategy) });
+  }
+  return map;
 }
 function source(db: Database, table: string): Row[] { return (db.query('SELECT payload FROM runtime_source_records WHERE kind=? ORDER BY id').all(table) as Row[]).map(r => obj(r.payload)); }
 function nodes(db: Database): Row[] { return (db.query('SELECT payload FROM runtime_nodes ORDER BY id').all() as Row[]).map(r => obj(r.payload)); }
@@ -150,12 +182,11 @@ export function heartbeatRuntimeMachine(db: Database, machineID: number, body: {
   return {revision:current,applied_revision:applied ?? null,ready:matching&&body.core_ready===true&&body.telemetry_ready===true};
 }
 export function runtimeMachineViews(db: Database) { return (db.query('SELECT id,state,active,applied_revision,last_seen_at,version,core_ready,telemetry_ready,payload FROM runtime_machines ORDER BY id').all() as Row[]).map(m=>{const p=obj(m.payload);return {id:m.id,name:p.name||`Machine ${m.id}`,host:p.host||p.address||'',enabled:m.state!=='disabled',runtime:true,state:m.state,active:!!m.active,last_seen_at:m.last_seen_at,version:m.version,applied_revision:m.applied_revision,core_ready:!!m.core_ready,telemetry_ready:!!m.telemetry_ready};}); }
-export function runtimeNodeViews(db: Database) { const ms=runtimeMachineViews(db);const bindings=db.query('SELECT machine_id,node_id FROM runtime_bindings').all() as Row[];const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));return all.map(n=>{const root=rootFor(ns,n);const machine_ids=[...new Set(bindings.filter(b=>Number(b.node_id)===Number(root.id)||Number(b.node_id)===Number(n.id)).map(b=>Number(b.machine_id)))];const active=machine_ids.some(id=>ms.some(m=>m.id===id&&m.active&&m.core_ready&&m.telemetry_ready));return {id:Number(n.id),name:n.name,host:n.host,port:Number(n.port),server_port:Number(root.server_port||root.port),protocol:root.type||root.protocol,parent_id:Number(n.parent_id)||null,enabled:yes(n.enabled),show:yes(n.show),group_ids:arr(n.group_ids),entry_ips:storedEntryIPs(n.entry_ips),rate:Number(n.rate ?? 1),rate_time_enable:yes(n.rate_time_enable,false),rate_time_ranges:arr(n.rate_time_ranges),tags:arr(n.tags),sort:Number(n.sort)||0,transfer_enable:Number(n.transfer_enable)||0,machine_ids,active,runtime:true,state:active?'active':'pending'};}).sort((a,b)=>a.sort-b.sort||a.id-b.id); }
-export function setRuntimeEntryIPs(db: Database, id: number, ips: string[]): boolean {
-  const row = db.query('SELECT payload FROM runtime_nodes WHERE id=?').get(id) as Row | null;
-  if (!row) return false;
-  const payload = obj(row.payload); payload.entry_ips = ips;
-  db.query('UPDATE runtime_nodes SET payload=? WHERE id=?').run(JSON.stringify(payload), id);
+export function runtimeNodeViews(db: Database) { const ms=runtimeMachineViews(db);const bindings=db.query('SELECT machine_id,node_id FROM runtime_bindings').all() as Row[];const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));const entries=runtimeEntries(db);return all.map(n=>{const root=rootFor(ns,n);const machine_ids=[...new Set(bindings.filter(b=>Number(b.node_id)===Number(root.id)||Number(b.node_id)===Number(n.id)).map(b=>Number(b.machine_id)))];const active=machine_ids.some(id=>ms.some(m=>m.id===id&&m.active&&m.core_ready&&m.telemetry_ready));const entry=entries.get(Number(n.id));return {id:Number(n.id),name:n.name,host:n.host,port:Number(n.port),server_port:Number(root.server_port||root.port),protocol:root.type||root.protocol,parent_id:Number(n.parent_id)||null,enabled:yes(n.enabled),show:yes(n.show),group_ids:arr(n.group_ids),entry_ips:entry?.entry_ips||[],entry_strategy:entry?.entry_strategy||'round-robin',rate:Number(n.rate ?? 1),rate_time_enable:yes(n.rate_time_enable,false),rate_time_ranges:arr(n.rate_time_ranges),tags:arr(n.tags),sort:Number(n.sort)||0,transfer_enable:Number(n.transfer_enable)||0,machine_ids,active,runtime:true,state:active?'active':'pending'};}).sort((a,b)=>a.sort-b.sort||a.id-b.id); }
+export function setRuntimeEntryIPs(db: Database, id: number, ips: string[], strategy = 'round-robin'): boolean {
+  if (!db.query('SELECT id FROM runtime_nodes WHERE id=?').get(id)) return false;
+  if (!ips.length) { db.query('DELETE FROM runtime_node_entries WHERE node_id=?').run(id); return true; }
+  db.query('INSERT INTO runtime_node_entries(node_id,entry_ips,entry_strategy,updated_at) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET entry_ips=excluded.entry_ips,entry_strategy=excluded.entry_strategy,updated_at=excluded.updated_at').run(id, JSON.stringify(ips), storedEntryStrategy(strategy), new Date().toISOString());
   return true;
 }
 export function deactivateMachine(db: Database, machineID: number) { db.query("UPDATE runtime_machines SET state='pending',active=0,core_ready=0,telemetry_ready=0 WHERE id=?").run(machineID); }
@@ -455,7 +486,7 @@ function clientSettings(ps: Row, protocol: string, n: Row): Row {
 }
 export function authorizedEndpoints(db: Database, userID: number): RuntimeEndpoint[] {
   const u=db.query('SELECT * FROM users WHERE id=?').get(userID) as Row;if(!u)return [];
-  const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));const activeRoots=new Set<number>();
+  const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));const activeRoots=new Set<number>();const entries=runtimeEntries(db);
   for(const b of db.query("SELECT b.node_id FROM runtime_bindings b JOIN runtime_machines m ON m.id=b.machine_id WHERE m.active=1 AND m.state='active' AND m.core_ready=1 AND m.telemetry_ready=1").all() as Row[]) {const n=ns.get(Number(b.node_id));if(n)activeRoots.add(Number(rootFor(ns,n).id));}
   const ranked:{endpoint:RuntimeEndpoint;key:[number,number,number,number]}[]=[];
   for(const n of all) {
@@ -466,8 +497,9 @@ export function authorizedEndpoints(db: Database, userID: number): RuntimeEndpoi
       const pid=profile?profileID(profile):'';const cred=identity(db,u,n,pid);const credential=protocol==='shadowsocks'?`${shadowsocksServerPSK(root,ps.cipher||ps.method)}:${ssUserPSK(cred,ps.cipher||ps.method)}`:cred;
       const safe=clientSettings(ps,protocol,{...root,...n});
       const profileName=profile?String(profile.name||'').trim():'';
-      const entry_ips=storedEntryIPs(n.entry_ips);
-      ranked.push({endpoint:{id:profile?`${n.id}:p:${pid}`:Number(n.id),name:profileName||n.name,protocol,host:String(n.host),port:port(n.port,`node ${n.id}`),credential,settings:safe,...(entry_ips.length?{entry_ips}:{})},key:[Number(n.sort)||0,Number(n.id),profile?Number(profile.sort)||0:-1,profile?Number(profile.id)||0:0]});
+      const entry=entries.get(Number(n.id));
+      const entry_ips=entry?.entry_ips||[];
+      ranked.push({endpoint:{id:profile?`${n.id}:p:${pid}`:Number(n.id),name:profileName||n.name,protocol,host:String(n.host),port:port(n.port,`node ${n.id}`),credential,settings:safe,...(entry_ips.length?{entry_ips,entry_strategy:entry!.entry_strategy}:{})},key:[Number(n.sort)||0,Number(n.id),profile?Number(profile.sort)||0:-1,profile?Number(profile.id)||0:0]});
     }
   }
   ranked.sort((a,b)=>{for(let i=0;i<4;i++)if(a.key[i]!==b.key[i])return a.key[i]-b.key[i];return 0;});

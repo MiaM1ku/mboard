@@ -1568,3 +1568,87 @@ body, .topbar, .card, .subscription-card, .toast {
     scroll-behavior: auto !important;
   }
 }
+
+/* Traffic pools, node shares and the quota figure */
+.mb-custom-pool-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.mb-custom-pool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+.mb-custom-pool-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.mb-custom-pool-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+.mb-custom-pool-figure strong {
+  font-size: 22px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.mb-custom-pool-card .usage-track {
+  margin: 4px 0;
+}
+.mb-custom-pool-card .button {
+  align-self: flex-start;
+  padding-left: 0;
+}
+.usage-track span.is-ok {
+  background: var(--success);
+}
+.usage-track span.is-warning {
+  background: var(--warning);
+}
+.usage-track span.is-danger,
+.usage-track span.is-exceeded {
+  background: var(--danger);
+}
+.mb-custom-share {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.mb-custom-share-bar {
+  display: block;
+  height: 5px;
+  width: 100%;
+  max-width: 220px;
+  background: var(--muted);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.mb-custom-share-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--info);
+  border-radius: inherit;
+  transform-origin: left center;
+  animation: mb-usage-grow 560ms var(--motion-ease);
+}
+.mb-custom-quota-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+@media (max-width: 620px) {
+  .mb-custom-pool-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
