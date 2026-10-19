@@ -65,6 +65,21 @@ async function invariant(page: Page) {
     }),
   );
   expect(aligned).toBe(true);
+  // The chart sets its viewBox one frame after a resize; wait for that frame so
+  // the label-size check measures the settled layout.
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll(".traffic-chart svg")).every(
+          (svg) =>
+            Math.abs(
+              svg.clientWidth -
+                Number((svg.getAttribute("viewBox") || "0 0 0 0").split(" ")[2]),
+            ) <= 1,
+        ),
+      ),
+    )
+    .toBe(true);
   const chartLegible = await page.evaluate(() =>
     Array.from(
       document.querySelectorAll<SVGTextElement>(".traffic-chart text"),

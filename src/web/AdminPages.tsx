@@ -739,52 +739,6 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                   title="近 30 天流量"
                   description="按 UTC 日期查看上传和下载用量。"
                 />
-                <Card>
-                  <div className="card-header">
-                    <div>
-                      <h2>用户用量</h2>
-                      <p>所选区间里用流量最多的账户。</p>
-                    </div>
-                  </div>
-                  {data.top_users.length ? (
-                    <div className="table-wrap">
-                      <table className="data-table">
-                        <thead>
-                          <tr>
-                            <th>用户</th>
-                            <th>区间用量</th>
-                            <th>累计 / 额度</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {data.top_users.map((user) => (
-                            <tr key={user.id}>
-                              <td>
-                                <strong>{user.name}</strong>
-                                <div className="mb-custom-meta">
-                                  {user.email}
-                                </div>
-                              </td>
-                              <td>{formatBytes(user.bytes)}</td>
-                              <td>
-                                {formatBytes(user.total_bytes)}
-                                {user.quota_bytes > 0
-                                  ? ` / ${formatBytes(user.quota_bytes)}`
-                                  : " · 按实际用量累计"}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <div className="card-body">
-                      <p className="mb-custom-meta">
-                        所选区间里暂无账户流量。
-                      </p>
-                    </div>
-                  )}
-                </Card>
               </div>
               <div className="section-stack">
                 <Card>
@@ -833,6 +787,52 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                 </Card>
               </div>
             </div>
+            <Card>
+              <div className="card-header">
+                <div>
+                  <h2>用户用量</h2>
+                  <p>所选区间里用流量最多的账户。</p>
+                </div>
+              </div>
+              {data.top_users.length ? (
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>用户</th>
+                        <th>区间用量</th>
+                        <th>累计 / 额度</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.top_users.map((user) => (
+                        <tr key={user.id}>
+                          <td>
+                            <strong>{user.name}</strong>
+                            <div className="mb-custom-meta">
+                              {user.email}
+                            </div>
+                          </td>
+                          <td>{formatBytes(user.bytes)}</td>
+                          <td>
+                            {formatBytes(user.total_bytes)}
+                            {user.quota_bytes > 0
+                              ? ` / ${formatBytes(user.quota_bytes)}`
+                              : " · 按实际用量累计"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="card-body">
+                  <p className="mb-custom-meta">
+                    所选区间里暂无账户流量。
+                  </p>
+                </div>
+              )}
+            </Card>
             <Card>
               <div className="card-header mb-custom-toolbar">
                 <div>
