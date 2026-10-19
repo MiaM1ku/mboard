@@ -740,91 +740,47 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                   description="按 UTC 日期查看上传和下载用量。"
                 />
                 <Card>
-                  <div className="card-header mb-custom-toolbar">
+                  <div className="card-header">
                     <div>
-                      <h2>节点用量</h2>
-                      <p>所选区间里每个节点承载的流量，含入口和出口。</p>
+                      <h2>用户用量</h2>
+                      <p>所选区间里用流量最多的账户。</p>
                     </div>
-                    {data.top_nodes.length > 10 && (
-                      <Button
-                        variant="secondary"
-                        size="small"
-                        onClick={() => setShowAllNodes((value) => !value)}
-                      >
-                        {showAllNodes
-                          ? "收起"
-                          : `查看全部 ${data.top_nodes.length} 个`}
-                      </Button>
-                    )}
                   </div>
-                  {data.top_nodes.length ? (
+                  {data.top_users.length ? (
                     <div className="table-wrap">
                       <table className="data-table">
                         <thead>
                           <tr>
-                            <th>节点</th>
-                            <th>服务器</th>
-                            <th>状态</th>
                             <th>用户</th>
-                            <th>上传</th>
-                            <th>下载</th>
-                            <th>合计</th>
+                            <th>区间用量</th>
+                            <th>累计 / 额度</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {(showAllNodes
-                            ? data.top_nodes
-                            : data.top_nodes.slice(0, 10)
-                          ).map((node) => {
-                            const total = node.upload_bytes + node.download_bytes;
-                            const sum = data.top_nodes.reduce(
-                              (value, item) =>
-                                value + item.upload_bytes + item.download_bytes,
-                              0,
-                            );
-                            return (
-                              <tr key={node.id}>
-                                <td>
-                                  <strong>{node.name}</strong>
-                                  {node.parent_name && (
-                                    <div className="mb-custom-meta">
-                                      入口 {node.parent_name}
-                                    </div>
-                                  )}
-                                </td>
-                                <td className="mb-custom-meta">
-                                  {node.machine_names.length
-                                    ? node.machine_names.join(" / ")
-                                    : "待关联"}
-                                </td>
-                                <td>
-                                  <Badge
-                                    tone={node.online ? "success" : "warning"}
-                                  >
-                                    {node.online ? "在线" : "等待心跳"}
-                                  </Badge>
-                                </td>
-                                <td>{count(node.users)}</td>
-                                <td>{formatBytes(node.upload_bytes)}</td>
-                                <td>{formatBytes(node.download_bytes)}</td>
-                                <td>
-                                  <div className="mb-custom-share">
-                                    <span>{formatBytes(total)}</span>
-                                    <ShareBar
-                                      share={sum > 0 ? total / sum : 0}
-                                    />
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
+                          {data.top_users.map((user) => (
+                            <tr key={user.id}>
+                              <td>
+                                <strong>{user.name}</strong>
+                                <div className="mb-custom-meta">
+                                  {user.email}
+                                </div>
+                              </td>
+                              <td>{formatBytes(user.bytes)}</td>
+                              <td>
+                                {formatBytes(user.total_bytes)}
+                                {user.quota_bytes > 0
+                                  ? ` / ${formatBytes(user.quota_bytes)}`
+                                  : " · 按实际用量累计"}
+                              </td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
                   ) : (
                     <div className="card-body">
                       <p className="mb-custom-meta">
-                        所选区间里暂无节点流量。
+                        所选区间里暂无账户流量。
                       </p>
                     </div>
                   )}
@@ -875,54 +831,98 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                     </div>
                   )}
                 </Card>
-                <Card>
-                  <div className="card-header">
-                    <div>
-                      <h2>用户用量</h2>
-                      <p>所选区间里用流量最多的账户。</p>
-                    </div>
-                  </div>
-                  {data.top_users.length ? (
-                    <div className="table-wrap">
-                      <table className="data-table">
-                        <thead>
-                          <tr>
-                            <th>用户</th>
-                            <th>区间用量</th>
-                            <th>累计 / 额度</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {data.top_users.map((user) => (
-                            <tr key={user.id}>
-                              <td>
-                                <strong>{user.name}</strong>
-                                <div className="mb-custom-meta">
-                                  {user.email}
-                                </div>
-                              </td>
-                              <td>{formatBytes(user.bytes)}</td>
-                              <td>
-                                {formatBytes(user.total_bytes)}
-                                {user.quota_bytes > 0
-                                  ? ` / ${formatBytes(user.quota_bytes)}`
-                                  : " · 按实际用量累计"}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <div className="card-body">
-                      <p className="mb-custom-meta">
-                        所选区间里暂无账户流量。
-                      </p>
-                    </div>
-                  )}
-                </Card>
               </div>
             </div>
+            <Card>
+              <div className="card-header mb-custom-toolbar">
+                <div>
+                  <h2>节点用量</h2>
+                  <p>所选区间里每个节点承载的流量，含入口和出口。</p>
+                </div>
+                {data.top_nodes.length > 10 && (
+                  <Button
+                    variant="secondary"
+                    size="small"
+                    onClick={() => setShowAllNodes((value) => !value)}
+                  >
+                    {showAllNodes
+                      ? "收起"
+                      : `查看全部 ${data.top_nodes.length} 个`}
+                  </Button>
+                )}
+              </div>
+              {data.top_nodes.length ? (
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>节点</th>
+                        <th>服务器</th>
+                        <th>状态</th>
+                        <th>用户</th>
+                        <th>上传</th>
+                        <th>下载</th>
+                        <th>合计</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(showAllNodes
+                        ? data.top_nodes
+                        : data.top_nodes.slice(0, 10)
+                      ).map((node) => {
+                        const total = node.upload_bytes + node.download_bytes;
+                        const sum = data.top_nodes.reduce(
+                          (value, item) =>
+                            value + item.upload_bytes + item.download_bytes,
+                          0,
+                        );
+                        return (
+                          <tr key={node.id}>
+                            <td>
+                              <strong>{node.name}</strong>
+                              {node.parent_name && (
+                                <div className="mb-custom-meta">
+                                  入口 {node.parent_name}
+                                </div>
+                              )}
+                            </td>
+                            <td className="mb-custom-meta">
+                              {node.machine_names.length
+                                ? node.machine_names.join(" / ")
+                                : "待关联"}
+                            </td>
+                            <td>
+                              <Badge
+                                tone={node.online ? "success" : "warning"}
+                              >
+                                {node.online ? "在线" : "等待心跳"}
+                              </Badge>
+                            </td>
+                            <td>{count(node.users)}</td>
+                            <td>{formatBytes(node.upload_bytes)}</td>
+                            <td>{formatBytes(node.download_bytes)}</td>
+                            <td>
+                              <div className="mb-custom-share">
+                                <span>{formatBytes(total)}</span>
+                                <ShareBar
+                                  share={sum > 0 ? total / sum : 0}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="card-body">
+                  <p className="mb-custom-meta">
+                    所选区间里暂无节点流量。
+                  </p>
+                </div>
+              )}
+            </Card>
           </>
         )}
       </ResourceView>

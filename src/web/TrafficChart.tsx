@@ -1,4 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { TrafficPoint } from "./types";
 import { formatBytes } from "./api";
 import { Card, EmptyState } from "./ui";
@@ -26,9 +27,11 @@ export function TrafficChart({
     const svg = svgRef.current;
     if (!svg) return;
     const measure = () =>
-      setWidth(Math.max(240, svg.getBoundingClientRect().width));
+      setWidth(Math.max(240, Math.round(svg.getBoundingClientRect().width)));
     measure();
-    const observer = new ResizeObserver(measure);
+    // Commit the new viewBox in the same frame as the resize, so labels never
+    // render one frame at a stale scale.
+    const observer = new ResizeObserver(() => flushSync(measure));
     observer.observe(svg);
     return () => observer.disconnect();
   }, [Boolean(data.length)]);
