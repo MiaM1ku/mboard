@@ -253,6 +253,8 @@ function Home({
           <div className="dashboard-grid">
             <div className="section-stack">
               <TrafficChart data={data.traffic} />
+            </div>
+            <div className="section-stack">
               <Card>
                 <div className="card-header mb-custom-toolbar">
                   <div>
@@ -283,70 +285,59 @@ function Home({
                   </div>
                 ) : (
                   <div className="card-body">
-                    <p className="mb-custom-meta">
-                      近 30 天暂无节点流量。
-                    </p>
+                    <p className="mb-custom-meta">近 30 天暂无节点流量。</p>
                   </div>
                 )}
               </Card>
             </div>
-            <div className="section-stack">
-              {data.pools.length > 0 && (
-                <Card>
-                  <div className="card-header">
-                    <div>
-                      <h2>线路余量</h2>
-                      <p>你可用线路所属流量池的剩余比例。</p>
-                    </div>
-                  </div>
-                  <div className="card-body mb-custom-record-list">
-                    {data.pools.map((pool) => (
-                      <div className="mb-custom-record" key={pool.id}>
-                        <div className="mb-custom-record-heading">
-                          <strong>{pool.name}</strong>
-                          <Badge
-                            tone={
-                              pool.status === "exceeded"
-                                ? "danger"
-                                : pool.status === "warning"
-                                  ? "warning"
-                                  : "success"
-                            }
-                          >
-                            {pool.status === "exceeded"
-                              ? "已超额度"
-                              : pool.status === "warning"
-                                ? "接近上限"
-                                : "正常"}
-                          </Badge>
-                        </div>
-                        <div
-                          className="usage-track"
-                          role="progressbar"
-                          aria-label={`${pool.name} 剩余`}
-                          aria-valuenow={pool.remaining_percent}
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                        >
-                          <span
-                            className={`is-${pool.status === "ok" ? "ok" : pool.status}`}
-                            style={{
-                              width: `${Math.max(1, pool.remaining_percent)}%`,
-                            }}
-                          />
-                        </div>
-                        <span className="mb-custom-meta">
-                          剩余 {pool.remaining_percent}% ·{" "}
-                          {pool.cycle_end.slice(5)} 重置 · 还有 {pool.days_left}{" "}
-                          天
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-              )}
-            </div>
           </div>
+          {data.pools.length > 0 && (
+            <Card>
+              <div className="card-header">
+                <div>
+                  <h2>线路余量</h2>
+                  <p>你可用线路所属流量池的剩余比例。</p>
+                </div>
+              </div>
+              <div className="card-body mb-custom-pool-grid">
+                {data.pools.map((pool) => (
+                  <article className="mb-custom-pool-chip" key={pool.id}>
+                    <div className="mb-custom-pool-head">
+                      <strong>{pool.name}</strong>
+                      {pool.status !== "ok" && (
+                        <Badge
+                          tone={
+                            pool.status === "exceeded" ? "danger" : "warning"
+                          }
+                        >
+                          {pool.status === "exceeded" ? "已超额度" : "接近上限"}
+                        </Badge>
+                      )}
+                    </div>
+                    <div
+                      className="usage-track"
+                      role="progressbar"
+                      aria-label={`${pool.name} 剩余`}
+                      aria-valuenow={pool.remaining_percent}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                    >
+                      <span
+                        className={`is-${pool.status === "ok" ? "ok" : pool.status}`}
+                        style={{
+                          width: `${Math.max(1, pool.remaining_percent)}%`,
+                        }}
+                      />
+                    </div>
+                    <span className="mb-custom-meta">
+                      剩余 {pool.remaining_percent}% ·{" "}
+                      {pool.cycle_end.slice(5)} 重置 · 还有 {pool.days_left} 天
+                    </span>
+                  </article>
+                ))}
+              </div>
+            </Card>
+          )}
           <Card>
             <div className="card-header">
               <div>

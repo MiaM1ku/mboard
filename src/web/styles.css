@@ -1712,3 +1712,22 @@ body, .topbar, .card, .subscription-card, .toast {
   }
 }
 
+
+.mb-custom-pool-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.mb-custom-pool-chip .mb-custom-pool-head {
+  align-items: center;
+}
+.mb-custom-pool-chip strong {
+  font-size: 14px;
+}
+.mb-custom-pool-chip .usage-track {
+  margin: 2px 0;
+}
+
