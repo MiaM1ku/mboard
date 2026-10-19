@@ -349,7 +349,9 @@ test("管理端 CRUD、一次性令牌和站点展示", async ({ page }) => {
     .getByRole("dialog")
     .getByRole("button", { name: "保存更改" })
     .click();
-  await expect(page.getByRole("cell", { name: /1 GB/ })).toBeVisible();
+  await expect(
+    page.getByRole("row", { name: /验收账户/ }).getByText("配额 1 GB"),
+  ).toBeVisible();
   await page.goto("/#/admin/machines");
   await page
     .getByRole("button", { name: "创建机器", exact: true })
@@ -618,11 +620,11 @@ test("页面、图表和导航动效保留布局与真实数据点", async ({ pa
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/#/user/overview");
-  await expect(page.locator(".kpi-card")).toHaveCount(4);
+  await expect(page.locator(".kpi-card")).toHaveCount(3);
   expect(await page.locator("main").evaluate(el => getComputedStyle(el).animationName)).toBe("mb-page-enter");
   const cards = page.locator(".kpi-card");
   expect(await cards.nth(0).evaluate(el => getComputedStyle(el).animationDelay)).toBe("0.09s");
-  expect(await cards.nth(3).evaluate(el => getComputedStyle(el).animationDelay)).toBe("0.255s");
+  expect(await cards.nth(2).evaluate(el => getComputedStyle(el).animationDelay)).toBe("0.2s");
   const single = page.locator(".mb-custom-chart-series");
   await expect(single).toHaveAttribute("data-motion-points", "1");
   await expect(single.locator(".mb-custom-chart-point")).toHaveCount(2);

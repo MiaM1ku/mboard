@@ -150,19 +150,10 @@ function Home({
           icon: <ArrowUp size={18} />,
         },
         {
-          title: "近 30 天",
-          value: data.traffic.reduce(
-            (sum, point) => sum + point.upload_bytes + point.download_bytes,
-            0,
-          ),
-          hint: "近 30 天按 UTC 日期累计",
-          icon: <ArrowDown size={18} />,
-        },
-        {
           title: "本月",
           value: data.month_bytes.upload_bytes + data.month_bytes.download_bytes,
-          hint: "本月累计，按 UTC 日期统计",
-          icon: <SlidersHorizontal size={18} />,
+          hint: `上传 ${formatBytes(data.month_bytes.upload_bytes)} · 下载 ${formatBytes(data.month_bytes.download_bytes)}`,
+          icon: <ArrowDown size={18} />,
         },
       ]
     : [];
@@ -247,7 +238,7 @@ function Home({
               </a>
             </div>
           </Card>
-          <div className="kpi-grid">
+          <div className="kpi-grid is-three">
             {stats.map((stat) => (
               <Kpi
                 key={stat.title}
@@ -262,8 +253,6 @@ function Home({
           <div className="dashboard-grid">
             <div className="section-stack">
               <TrafficChart data={data.traffic} />
-            </div>
-            <div className="section-stack">
               <Card>
                 <div className="card-header mb-custom-toolbar">
                   <div>
@@ -300,6 +289,8 @@ function Home({
                   </div>
                 )}
               </Card>
+            </div>
+            <div className="section-stack">
               {data.pools.length > 0 && (
                 <Card>
                   <div className="card-header">

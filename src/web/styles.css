@@ -1652,3 +1652,63 @@ body, .topbar, .card, .subscription-card, .toast {
   }
 }
 
+
+/* Compact pool cards and the three-window usage row */
+.kpi-grid.is-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.mb-custom-pool-card {
+  gap: 6px;
+  padding: 15px 16px;
+}
+.mb-custom-pool-card p {
+  margin: 0;
+}
+.mb-custom-pool-card .usage-track {
+  margin: 2px 0 0;
+}
+.mb-custom-pool-card .mb-custom-pool-projection {
+  font-size: 12px;
+}
+@media (max-width: 1180px) {
+  .kpi-grid.is-three {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 620px) {
+  .kpi-grid.is-three {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .mb-custom-pool-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .mb-custom-pool-card {
+    padding: 12px;
+    gap: 4px;
+  }
+  .mb-custom-pool-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+  }
+  .mb-custom-pool-head h3 {
+    font-size: 13px;
+  }
+  .mb-custom-pool-members,
+  .mb-custom-pool-projection,
+  .mb-custom-pool-warning {
+    display: none;
+  }
+  .mb-custom-pool-figure strong {
+    font-size: 16px;
+  }
+  .mb-custom-pool-figure .muted {
+    font-size: 11px;
+  }
+  .mb-custom-pool-card p.mb-custom-meta {
+    font-size: 11px;
+    line-height: 1.45;
+  }
+}
+

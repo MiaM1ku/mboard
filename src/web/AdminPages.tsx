@@ -535,13 +535,7 @@ const POOL_STATUS_TONE: Record<PoolStatus, "success" | "warning" | "danger"> = {
   warning: "warning",
   exceeded: "danger",
 };
-function PoolCard({
-  pool,
-  onOpen,
-}: {
-  pool: TrafficPool;
-  onOpen: () => void;
-}) {
+function PoolCard({ pool }: { pool: TrafficPool }) {
   const usage = pool.usage;
   const percent = Math.min(100, usage.percent);
   return (
@@ -549,13 +543,15 @@ function PoolCard({
       <div className="mb-custom-pool-head">
         <div>
           <h3>{pool.name}</h3>
-          <span className="mb-custom-meta">
+          <span className="mb-custom-meta mb-custom-pool-members">
             {POOL_KIND_LABEL[pool.kind]} · {pool.members.length} 个成员
           </span>
         </div>
-        <Badge tone={POOL_STATUS_TONE[usage.status]}>
-          {POOL_STATUS_LABEL[usage.status]}
-        </Badge>
+        {usage.status !== "ok" && (
+          <Badge tone={POOL_STATUS_TONE[usage.status]}>
+            {POOL_STATUS_LABEL[usage.status]}
+          </Badge>
+        )}
       </div>
       <div className="mb-custom-pool-figure">
         <strong>{formatBytes(usage.used_bytes)}</strong>
@@ -582,21 +578,18 @@ function PoolCard({
         <p
           className={
             usage.projected_bytes > usage.quota_bytes
-              ? "text-danger"
-              : "mb-custom-meta"
+              ? "text-danger mb-custom-pool-projection"
+              : "mb-custom-meta mb-custom-pool-projection"
           }
         >
           按现在速度，周期末约 {formatBytes(usage.projected_bytes)}
         </p>
       )}
       {usage.warnings.map((warning) => (
-        <p className="mb-custom-meta" key={warning.code}>
+        <p className="mb-custom-meta mb-custom-pool-warning" key={warning.code}>
           {warning.message}
         </p>
       ))}
-      <Button variant="ghost" size="small" onClick={onOpen}>
-        调整额度
-      </Button>
     </article>
   );
 }
@@ -724,11 +717,7 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
               {data.pools.length ? (
                 <div className="card-body mb-custom-pool-grid">
                   {data.pools.map((pool) => (
-                    <PoolCard
-                      key={pool.id}
-                      pool={pool}
-                      onOpen={() => onNavigate("pools")}
-                    />
+                    <PoolCard key={pool.id} pool={pool} />
                   ))}
                 </div>
               ) : (
@@ -750,6 +739,96 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                   title="近 30 天流量"
                   description="按 UTC 日期查看上传和下载用量。"
                 />
+                <Card>
+                  <div className="card-header mb-custom-toolbar">
+                    <div>
+                      <h2>节点用量</h2>
+                      <p>所选区间里每个节点承载的流量，含入口和出口。</p>
+                    </div>
+                    {data.top_nodes.length > 10 && (
+                      <Button
+                        variant="secondary"
+                        size="small"
+                        onClick={() => setShowAllNodes((value) => !value)}
+                      >
+                        {showAllNodes
+                          ? "收起"
+                          : `查看全部 ${data.top_nodes.length} 个`}
+                      </Button>
+                    )}
+                  </div>
+                  {data.top_nodes.length ? (
+                    <div className="table-wrap">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th>节点</th>
+                            <th>服务器</th>
+                            <th>状态</th>
+                            <th>用户</th>
+                            <th>上传</th>
+                            <th>下载</th>
+                            <th>合计</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(showAllNodes
+                            ? data.top_nodes
+                            : data.top_nodes.slice(0, 10)
+                          ).map((node) => {
+                            const total = node.upload_bytes + node.download_bytes;
+                            const sum = data.top_nodes.reduce(
+                              (value, item) =>
+                                value + item.upload_bytes + item.download_bytes,
+                              0,
+                            );
+                            return (
+                              <tr key={node.id}>
+                                <td>
+                                  <strong>{node.name}</strong>
+                                  {node.parent_name && (
+                                    <div className="mb-custom-meta">
+                                      入口 {node.parent_name}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="mb-custom-meta">
+                                  {node.machine_names.length
+                                    ? node.machine_names.join(" / ")
+                                    : "待关联"}
+                                </td>
+                                <td>
+                                  <Badge
+                                    tone={node.online ? "success" : "warning"}
+                                  >
+                                    {node.online ? "在线" : "等待心跳"}
+                                  </Badge>
+                                </td>
+                                <td>{count(node.users)}</td>
+                                <td>{formatBytes(node.upload_bytes)}</td>
+                                <td>{formatBytes(node.download_bytes)}</td>
+                                <td>
+                                  <div className="mb-custom-share">
+                                    <span>{formatBytes(total)}</span>
+                                    <ShareBar
+                                      share={sum > 0 ? total / sum : 0}
+                                    />
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="card-body">
+                      <p className="mb-custom-meta">
+                        所选区间里暂无节点流量。
+                      </p>
+                    </div>
+                  )}
+                </Card>
               </div>
               <div className="section-stack">
                 <Card>
@@ -844,96 +923,6 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
                 </Card>
               </div>
             </div>
-            <Card>
-              <div className="card-header mb-custom-toolbar">
-                <div>
-                  <h2>节点用量</h2>
-                  <p>所选区间里每个节点承载的流量，含入口和出口。</p>
-                </div>
-                {data.top_nodes.length > 10 && (
-                  <Button
-                    variant="secondary"
-                    size="small"
-                    onClick={() => setShowAllNodes((value) => !value)}
-                  >
-                    {showAllNodes
-                      ? "收起"
-                      : `查看全部 ${data.top_nodes.length} 个`}
-                  </Button>
-                )}
-              </div>
-              {data.top_nodes.length ? (
-                <div className="table-wrap">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>节点</th>
-                        <th>服务器</th>
-                        <th>状态</th>
-                        <th>用户</th>
-                        <th>上传</th>
-                        <th>下载</th>
-                        <th>合计</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(showAllNodes
-                        ? data.top_nodes
-                        : data.top_nodes.slice(0, 10)
-                      ).map((node) => {
-                        const total = node.upload_bytes + node.download_bytes;
-                        const sum = data.top_nodes.reduce(
-                          (value, item) =>
-                            value + item.upload_bytes + item.download_bytes,
-                          0,
-                        );
-                        return (
-                          <tr key={node.id}>
-                            <td>
-                              <strong>{node.name}</strong>
-                              {node.parent_name && (
-                                <div className="mb-custom-meta">
-                                  入口 {node.parent_name}
-                                </div>
-                              )}
-                            </td>
-                            <td className="mb-custom-meta">
-                              {node.machine_names.length
-                                ? node.machine_names.join(" / ")
-                                : "待关联"}
-                            </td>
-                            <td>
-                              <Badge
-                                tone={node.online ? "success" : "warning"}
-                              >
-                                {node.online ? "在线" : "等待心跳"}
-                              </Badge>
-                            </td>
-                            <td>{count(node.users)}</td>
-                            <td>{formatBytes(node.upload_bytes)}</td>
-                            <td>{formatBytes(node.download_bytes)}</td>
-                            <td>
-                              <div className="mb-custom-share">
-                                <span>{formatBytes(total)}</span>
-                                <ShareBar
-                                  share={sum > 0 ? total / sum : 0}
-                                />
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="card-body">
-                  <p className="mb-custom-meta">
-                    所选区间里暂无节点流量。
-                  </p>
-                </div>
-              )}
-            </Card>
           </>
         )}
       </ResourceView>
