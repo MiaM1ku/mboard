@@ -25,7 +25,7 @@ export interface TemplateValidation { valid: boolean; errors: TemplateIssue[]; w
 export interface RenderOptions {
   userAgent?: string; clientVersion?: string;
   /** Supplied by the caller; rendering never derives user metadata or reads it from the DB. */
-  metadata?: { app_name?: string; subs_link?: string; subs_domain?: string; subscribe_info?: string; upload_bytes?: number; download_bytes?: number; quota_bytes?: number; expires_at?: string | null };
+  metadata?: { app_name?: string; subs_link?: string; subs_domain?: string; subscribe_info?: string; /** Requesting client address; only a validated public IPv4 /24 reaches the template. */ client_ip?: string; upload_bytes?: number; download_bytes?: number; quota_bytes?: number; expires_at?: string | null };
 }
 export const SHARE_FORMATS = ['shadowrocket', 'quantumultx', 'loon'] as const;
 export type ShareFormat = typeof SHARE_FORMATS[number];
@@ -681,9 +681,25 @@ function fillIni(config: IniConfig, generated: string[], names: string[], warnin
   if (extraGroups.length) groups.lines.push(...extraGroups);
   return [...config.preamble, ...config.sections.flatMap(s => [s.header, ...s.lines])].join(config.eol) + (config.trailing ? config.eol : '');
 }
-function metadataText(text: string, metadata: RenderOptions['metadata'], keys: string[]): string {
-  return text.replace(/\$(app_name|subs_link|subs_domain|subscribe_info)(?![A-Za-z0-9_])/g, (marker, key: keyof NonNullable<RenderOptions['metadata']>) => {
-    const value = metadata?.[key];
+/** Domestic default for the DNS ECS hint when the requesting client address is unusable. */
+const DEFAULT_ECS_CIDR = '223.5.5.0/24';
+/** Template values plus the renderer-computed `client_cidr`; callers cannot override it. */
+type TemplateMetadata = NonNullable<RenderOptions['metadata']> & { client_cidr: string };
+/** Keep only a public IPv4 /24; private, loopback, CGNAT and malformed values fall back to the domestic default. */
+function ecsCidr(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_ECS_CIDR;
+  const parts = value.trim().split('.');
+  if (parts.length !== 4) return DEFAULT_ECS_CIDR;
+  const octets = parts.map(part => (/^\d{1,3}$/.test(part) ? Number(part) : NaN));
+  if (octets.some(octet => !Number.isInteger(octet) || octet > 255)) return DEFAULT_ECS_CIDR;
+  const [a, b, c] = octets as [number, number, number, number];
+  const reserved = a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  return reserved ? DEFAULT_ECS_CIDR : `${a}.${b}.${c}.0/24`;
+}
+function metadataText(text: string, metadata: TemplateMetadata, keys: string[]): string {
+  return text.replace(/\$(app_name|subs_link|subs_domain|subscribe_info|client_cidr)(?![A-Za-z0-9_])/g, (marker, key: string) => {
+    const value = (metadata as Record<string, unknown>)[key];
     // Single-pass replacement prevents caller data from becoming another template expression.
     return keys.includes(key) && typeof value === 'string' ? value.replace(/[\x00-\x1f\x7f]/g, ' ') : marker;
   });
@@ -731,24 +747,22 @@ export function renderSubscription(template: Pick<SubscriptionTemplate, 'name' |
   const warnings: string[] = []; const permitted: SubscriptionEndpoint[] = [];
   const reserved = new Set<string>();
   let root: Record<string, any> | undefined, doc: Document | undefined, ini: IniConfig | undefined;
+  // `$client_cidr` is always defined, so a template can never emit the literal marker into a client config.
+  const metadata: TemplateMetadata = { ...options.metadata, client_cidr: ecsCidr(options.metadata?.client_ip) };
   if (name === 'singbox') { root = jsonConfig(template.content); for (const outbound of root.outbounds) reserved.add(outbound.tag); }
   else if (['clash', 'clashmeta', 'stash'].includes(name)) {
     const parsed = yamlConfig(template.content); doc = parsed.doc;
-    if (options.metadata?.app_name !== undefined) {
-      visit(doc, { Scalar(_key, scalar) {
-        if (typeof scalar.value === 'string') scalar.value = metadataText(scalar.value, options.metadata, ['app_name']);
-      } });
-    }
+    visit(doc, { Scalar(_key, scalar) {
+      if (typeof scalar.value === 'string') scalar.value = metadataText(scalar.value, metadata, ['app_name', 'client_cidr']);
+    } });
     root = doc.toJS({ maxAliasCount: 100 }) as Record<string, any>; checkRoot(root, name);
     for (const item of [...root.proxies, ...root['proxy-groups']]) reserved.add(item.name);
     reserved.add('DIRECT'); reserved.add('REJECT');
   } else {
     ini = iniConfig(template.content);
-    if (options.metadata) {
-      const replace = (line: string) => metadataText(line, options.metadata, ['subs_link', 'subs_domain', 'subscribe_info']);
-      ini.preamble = ini.preamble.map(replace);
-      for (const section of ini.sections) { section.header = replace(section.header); section.lines = section.lines.map(replace); }
-    }
+    const replace = (line: string) => metadataText(line, metadata, ['subs_link', 'subs_domain', 'subscribe_info', 'client_cidr']);
+    ini.preamble = ini.preamble.map(replace);
+    for (const section of ini.sections) { section.header = replace(section.header); section.lines = section.lines.map(replace); }
     for (const section of ini.sections.filter(s => ['proxy', 'proxy group'].includes(s.name))) for (const line of section.lines) { const pair = iniPair(line); if (pair) reserved.add(unquote(pair.key)); }
     reserved.add('DIRECT'); reserved.add('REJECT');
   }

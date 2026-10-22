@@ -191,12 +191,17 @@ export function createApp(options: AppOptions = {}) {
       return {id:n.id,name:`node-${n.id}`,protocol:n.protocol,host:n.host,port:n.port,credential:u.credential,settings,entry_ips:entryList(n.entry_ips)};
     }),...runtimeEndpoints(db,u.id).filter(e=>healthyNodes.has(Number(String(e.id).split(':')[0])))];
   }
+  // Cloudflare stamps CF-Connecting-IP; nginx appends its own peer behind the forwarded client.
+  // Only the template DNS ECS hint reads this, and the renderer keeps nothing but a validated public IPv4 /24.
+  function clientAddress(req: Request): string | undefined {
+    return req.headers.get('cf-connecting-ip')?.trim() || req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || undefined;
+  }
   function renderedSubscription(u: Row, req: Request) {
     const name=selectSubscriptionFormat(req.headers.get('user-agent'),new URL(req.url).searchParams);
     const site=settings();const link=subscriptionURL(u.subscription_token)||`${new URL(req.url).origin}/s/${u.subscription_token}`;
     const clean=(s:unknown)=>String(s).replace(/[\r\n\x00-\x1f]/g,' ').replaceAll(',','，');
     const info=`title=${clean(site.site_name)}订阅信息, content=上传流量：${formatTraffic(u.upload_bytes)}\\n下载流量：${formatTraffic(u.download_bytes)}\\n流量额度：${Number(u.quota_bytes)>0?formatTraffic(u.quota_bytes):'不限'}\\n到期时间：${u.expires_at?clean(u.expires_at):'长期有效'}`;
-    const options={userAgent:req.headers.get('user-agent')||undefined,metadata:{app_name:clean(site.site_name),subs_link:link,subs_domain:new URL(link).host,subscribe_info:info,upload_bytes:Number(u.upload_bytes)||0,download_bytes:Number(u.download_bytes)||0,quota_bytes:Number(u.quota_bytes)||0,expires_at:u.expires_at?String(u.expires_at):null}};
+    const options={userAgent:req.headers.get('user-agent')||undefined,metadata:{app_name:clean(site.site_name),subs_link:link,subs_domain:new URL(link).host,subscribe_info:info,client_ip:clientAddress(req),upload_bytes:Number(u.upload_bytes)||0,download_bytes:Number(u.download_bytes)||0,quota_bytes:Number(u.quota_bytes)||0,expires_at:u.expires_at?String(u.expires_at):null}};
     if(name==='shadowrocket'||name==='quantumultx'||name==='loon')return renderShareLinks(name,subscriptionEndpoints(u),options);
     const template=getTemplate(db,name);
     if (!template) fail(503,'TEMPLATE_READY','请刷新模板配置后更新订阅');

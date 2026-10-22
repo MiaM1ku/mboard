@@ -108,6 +108,12 @@ Supported conversion is conservative:
 
 A supplied `clientVersion` takes priority over a recognizable version in `userAgent`. With no known version, the current format's capability is assumed. Version-specific adaptation of old DNS/routing schemas is not performed: the user's advanced sing-box template is preserved for the core it targets.
 
+### DNS ECS hint
+
+`$client_cidr` is the one derived template value: the requesting client's own IPv4 **/24**, so a `dns.nameserver` entry such as `https://dns.google/dns-query#ecs=$client_cidr&ecs-override=true` asks the upstream resolver for answers near that client instead of a segment one subscriber happens to share. The application layer passes the observed address as `metadata.client_ip`; the renderer truncates it to the /24 and rejects everything else — malformed values, `/`-suffixed input, hostnames, IPv4-mapped text, private ranges (10/8, 172.16/12, 192.168/16), loopback, link-local, CGNAT (100.64/10) and 0/8 — falling back to the domestic default `223.5.5.0/24` (AliDNS). `$client_cidr` is always defined, so a template can never emit the literal marker into a client config; callers cannot override the derived value, only `client_ip`. IPv6 clients therefore use the same default. The address is used for this hint only: it is not stored, logged or returned anywhere else.
+
+The value is best-effort by design. A client that refreshes through a proxy presents that node's egress address, and a direct refresh behind Cloudflare presents the address Cloudflare stamps (`CF-Connecting-IP`, falling back to the first `X-Forwarded-For` hop). Keep the previous fixed segment in mind when a subscription is fetched from a data center.
+
 ## Safety and validation boundaries
 
 YAML uses the [`yaml` core schema](https://github.com/eemeli/yaml/blob/main/docs/03_options.md), strict unique keys, no custom tags and a bounded alias count of 100. All parser warnings (including unresolved tags) fail validation. Multiple documents fail. No JavaScript evaluation, filesystem includes or remote-provider fetching occurs.

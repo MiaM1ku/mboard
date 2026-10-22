@@ -693,3 +693,18 @@ test.skipIf(!existsSync(singboxCore))('pinned sing-box 1.14.3 check accepts two 
   }
 });
 
+
+test('the DNS ECS hint uses the requesting client /24 and never leaks the token', () => {
+  const content = 'proxies: []\nproxy-groups:\n  - {name: 选择, type: select, proxies: [DIRECT]}\ndns:\n  nameserver:\n    - "https://dns.google/dns-query#ecs=$client_cidr&ecs-override=true"\nrules: ["MATCH,选择"]\n';
+  const nameserver = (metadata?: { client_ip?: string }) => parse(renderSubscription(template('clashmeta', content), [endpoint()], { metadata }).content).dns.nameserver[0];
+  expect(nameserver({ client_ip: '112.10.20.33' })).toBe('https://dns.google/dns-query#ecs=112.10.20.0/24&ecs-override=true');
+  expect(nameserver({ client_ip: '8.8.8.8' })).toBe('https://dns.google/dns-query#ecs=8.8.8.0/24&ecs-override=true');
+  for (const client_ip of ['10.1.2.3', '127.0.0.1', '192.168.1.5', '172.20.0.9', '100.64.3.4', '169.254.1.1', '1.2.3.256', '112.10.20.0/16', 'authored.example.test', '']) {
+    expect(nameserver({ client_ip })).toBe('https://dns.google/dns-query#ecs=223.5.5.0/24&ecs-override=true');
+  }
+  expect(nameserver()).toBe('https://dns.google/dns-query#ecs=223.5.5.0/24&ecs-override=true');
+  const ini = '[General]\r\ndns-server = 223.5.5.5\r\n[Proxy]\r\n本地 = direct\r\n[Proxy Group]\r\n选择 = select, 本地\r\n[Rule]\r\nFINAL,选择\r\n';
+  const rendered = renderSubscription({ name: 'surge', content: ini.replace('dns-server = 223.5.5.5', 'dns-server = 223.5.5.5, ecs-$client_cidr') }, [endpoint()], { metadata: { client_ip: '112.10.20.33' } }).content;
+  expect(rendered).toContain('ecs-112.10.20.0/24');
+  expect(rendered).not.toContain('$client_cidr');
+});
