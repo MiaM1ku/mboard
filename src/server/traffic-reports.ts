@@ -149,7 +149,7 @@ function labels(db: Database) {
   if (tableExists(db,'nodes')) for (const r of rows(db,'SELECT id,name FROM nodes')) {basicNames.set(String(r.id),String(r.name));if(!nodes.has(String(r.id)))nodes.set(String(r.id),r);}
   if (tableExists(db,'runtime_nodes')) for (const r of rows(db,'SELECT id,parent_id,payload FROM runtime_nodes')) nodes.set(String(r.id),{...parse(r.payload),parent_id:r.parent_id});
   if (tableExists(db,'runtime_source_records')) for (const r of rows(db,"SELECT payload FROM runtime_source_records WHERE kind='v2_server_route_profile'")) { const p=parse(r.payload);profiles.set(String(p.id),p);if(p.uuid)profiles.set(String(p.uuid),p); }
-  if (tableExists(db,'users')) for(const r of rows(db,'SELECT id,email FROM users')) emails.set(String(r.id),String(r.email));
+  if (tableExists(db,'users')) for(const r of rows(db,'SELECT id,email,name FROM users')) emails.set(String(r.id),String(r.name ?? '').trim() || String(r.email));
   // Matches the PHP's immediate-parent physical ID normalization.
   const root = (id: string) => { const parent = Number(nodes.get(id)?.parent_id); return parent > 0 ? String(parent) : id; };
   const nodeName = (id: string) => String(nodes.get(id)?.name || `Unknown Server (${id})`);
