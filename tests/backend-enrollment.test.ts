@@ -45,7 +45,7 @@ function fixture() {
     let body: any; try { body = JSON.parse(result); } catch { body = result; }
     return { response, status: response.status, text: result, body, data: body?.data };
   }
-  const request = (path: string, method = 'GET', data?: unknown, extra?: HeadersInit) => raw(path, method, data === undefined ? undefined : JSON.stringify(data), { ...(data === undefined ? {} : { 'content-type': 'application/json' }), ...Object.fromEntries(new Headers(extra)) });
+  const request = (path: string, method = 'GET', data?: unknown, extra?: HeadersInit) => raw(path, method, data === undefined ? undefined : JSON.stringify(data), { ...(data === undefined ? {} : { 'content-type': 'application/json' }), ...(['GET','HEAD'].includes(method) || path.startsWith('/api/node/') ? {} : { origin: publicOrigin }), ...Object.fromEntries(new Headers(extra)) });
   const node = (path: string, data: unknown, bearer = oldToken, extra?: HeadersInit, method = 'POST') => request(`/api/node/v1/${path}`, method, data, { authorization: `Bearer ${bearer}`, ...Object.fromEntries(new Headers(extra)) });
   const enroll = (bearer = oldToken, machineID = 10) => node('enroll', { machine_id: machineID }, bearer);
   const machine = (id = 10) => db.query('SELECT * FROM runtime_machines WHERE id=?').get(id) as Row;
@@ -267,5 +267,31 @@ describe('runtime-only node activation security', () => {
     const before = f.snapshot(); const denied = await f.node('activate', { config_revision: r.data.revision }, r.data.token);
     expect(denied.status).toBe(409); expectPrivateError(denied, [r.data.token]); expect(f.snapshot()).toEqual(before); expect(f.machine().state).toBe('pending');
     await f.heartbeat(r.data.token, c.revision); expect((await f.node('activate', { config_revision: c.revision }, r.data.token)).status).toBe(200);
+  });
+});
+
+describe('runtime machine token rotation', () => {
+  test('admin rotation reissues a working 64-hex credential and clears readiness', async () => {
+    const f = fixture(); const r = await f.enroll(); await f.heartbeat(r.data.token, r.data.revision);
+    expect((await f.node('activate', { config_revision: r.data.revision }, r.data.token)).status).toBe(200);
+    expect(f.machine()).toMatchObject({ state: 'active', active: 1, core_ready: 1, telemetry_ready: 1 });
+    const rotated = await f.request('/api/v1/admin/machines/10/token', 'POST', {}, { cookie: f.adminCookie });
+    expect(rotated.status).toBe(200); expect(rotated.data.runtime).toBe(true); expect(rotated.data.token).toMatch(/^[a-f0-9]{64}$/);
+    expect(rotated.data.token).not.toBe(r.data.token);
+    // The new credential authenticates immediately on an active machine, so a
+    // reinstall needs no enrollment round trip.
+    expect((await f.request('/api/node/v1/config', 'GET', undefined, { authorization: `Bearer ${rotated.data.token}` })).status).toBe(200);
+    for (const stale of [r.data.token, oldToken]) expect((await f.request('/api/node/v1/config', 'GET', undefined, { authorization: `Bearer ${stale}` })).status).toBe(401);
+    expect(f.machine()).toMatchObject({ state: 'active', active: 1, last_seen_at: null, core_ready: 0, telemetry_ready: 0 });
+    expect(JSON.stringify(f.db.query('SELECT * FROM audit').all())).not.toContain(rotated.data.token);
+    expect((await f.heartbeat(rotated.data.token, r.data.revision)).status).toBe(200);
+    expect(f.machine()).toMatchObject({ core_ready: 1, telemetry_ready: 1 });
+  });
+
+  test('rotation requires an admin session and an existing machine', async () => {
+    const f = fixture(); const r = await f.enroll();
+    expect((await f.request('/api/v1/admin/machines/10/token', 'POST', {}, { cookie: f.userCookie })).status).toBe(403);
+    expect((await f.request('/api/v1/admin/machines/999/token', 'POST', {}, { cookie: f.adminCookie })).status).toBe(404);
+    expect(f.machine().token_hash).toBe(hash(r.data.token));
   });
 });

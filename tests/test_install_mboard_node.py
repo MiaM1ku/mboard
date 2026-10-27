@@ -178,7 +178,7 @@ machine:
         self.shell('hash=$(sha256sum "$TEST_ROOT/binary"); hash=${hash%% *}; verify_binary "$TEST_ROOT/binary" "$hash"')
         self.shell('verify_binary "$TEST_ROOT/binary" "' + "0" * 64 + '"', False)
         text = INSTALLER.read_text()
-        self.assertIn("66a42d370414117ecf1f9c5dce92f7efb44d8a1cd5167546951f7d95246c0a83", text)
+        self.assertIn("458ccfbcfc24f428184b9125456c7c246db9508c5d343bfa510c43294847490d", text)
         self.assertIn("1e6b4ef716062484f52d3490c3b1c4d7798e8cd76aeaba3f01e9f3320c63bd90", text)
 
     def test_activation_schema(self):

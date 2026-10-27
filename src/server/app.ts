@@ -569,6 +569,15 @@ export function createApp(options: AppOptions = {}) {
         const view = (row: Row) => table === 'users' ? userView(row, true) : table === 'nodes' ? nodeView(row) : table === 'machines' ? machineView(row) : row;
         if (!id && method === 'GET') {const existing=all(`SELECT * FROM ${table} ORDER BY id`).map(view);return json(table==='nodes'?[...existing,...runtimeNodes()]:table==='machines'?[...existing,...runtimeMachines()]:existing)}
         if (id && table === 'machines' && match[3] && method === 'POST') {
+          // Runtime machines store only a token digest too, so a same-address
+          // reinstall has no other way to obtain a usable credential. Rotation
+          // clears readiness so the node must prove core and telemetry again.
+          if (!get('SELECT id FROM machines WHERE id=?', id)) {
+            if (!get('SELECT id FROM runtime_machines WHERE id=?', id)) fail(404, 'NOT_FOUND', '请确认这台机器是否还在');
+            const token = secret();
+            atomic(() => { run('UPDATE runtime_machines SET token_hash=?,last_seen_at=NULL,core_ready=0,telemetry_ready=0 WHERE id=?', hash(token), id); audit(u, 'runtime-machine.token.rotate', id); });
+            return json({ token, runtime: true });
+          }
           requireRow(table, id); const token = secret(); atomic(() => { run('UPDATE machines SET token_hash=?,last_seen_at=NULL,config_revision=config_revision+1 WHERE id=?', hash(token), id); audit(u, 'machine.token.rotate', id); }); return json({ token });
         }
         if (match[3]) fail(404, 'NOT_FOUND', '请检查接口地址');

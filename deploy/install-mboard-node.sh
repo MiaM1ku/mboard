@@ -3,7 +3,7 @@
 # Release publisher replaces both SHA256 constants before publishing.
 set -eu
 umask 077
-AGENT_SHA256='66a42d370414117ecf1f9c5dce92f7efb44d8a1cd5167546951f7d95246c0a83'
+AGENT_SHA256='458ccfbcfc24f428184b9125456c7c246db9508c5d343bfa510c43294847490d'
 CORE_SHA256='1e6b4ef716062484f52d3490c3b1c4d7798e8cd76aeaba3f01e9f3320c63bd90'
 
 say() { printf '%s\n' "$*"; }

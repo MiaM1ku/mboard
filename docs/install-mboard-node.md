@@ -4,6 +4,8 @@
 
 适用于 Linux amd64、root、systemd 或 OpenRC。Alpine 用 BusyBox `sh` 即可。安装器会先安装缺少的 `jq` 和 `curl`，所以需要包仓库和面板的 HTTPS 网络访问。Python 只用于开发测试。
 
+本脚本处理的是"旧 xboard-node 还在跑、需要停掉并清理启动入口"的场景。机器本来就没有旧服务、只想装节点时用 [一键部署](node-deploy.md) 的 `deploy-node.sh`，它不需要源 xboard 配置，令牌由面板签发。
+
 ## 夜机命令
 
 root 登录 HK_Night1（machine 10）后执行：
@@ -85,7 +87,7 @@ rc-service xboard-node status
 
 | 文件 | SHA256 |
 | --- | --- |
-| `/downloads/mboard-node-linux-amd64` | `81562d3681a4cbb60ac8409cda363c8df55d0c1ad8a98be9f9e05332fede2e1d` |
+| `/downloads/mboard-node-linux-amd64` | `458ccfbcfc24f428184b9125456c7c246db9508c5d343bfa510c43294847490d` |
 | `/downloads/sing-box-linux-amd64`（v1.14.3） | `1e6b4ef716062484f52d3490c3b1c4d7798e8cd76aeaba3f01e9f3320c63bd90` |
 
 发布时一起核对脚本里的两个常量和面板的真实下载文件。公开 SHA256 sidecar 可用于人工核对，但安装器的信任锚是脚本里的固定值。

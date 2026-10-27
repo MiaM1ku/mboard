@@ -4,7 +4,7 @@ mboard 是独立的连接管理工作区。Bun 承载 HTTP 服务、账号会话
 
 ## 远程部署
 
-部署目标为 example-host，上游监听 `http://127.0.0.1:8791`，公开入口为 `https://panel.example`。应用和 SQLite 在服务器的独立目录运行。服务、反代和回退步骤见 [部署说明](docs/deployment.md)。沿用原密码并归档完整节点配置的方案见 [记录先行迁移](docs/staged-migration.md)。
+部署目标为 example-host，上游监听 `http://127.0.0.1:8791`，公开入口为 `https://panel.example`。应用和 SQLite 在服务器的独立目录运行。服务、反代和回退步骤见 [部署说明](docs/deployment.md)。沿用原密码并归档完整节点配置的方案见 [记录先行迁移](docs/staged-migration.md)。给已有机器装节点用 [一键部署](docs/node-deploy.md)，同时说明 xbnode 导入轨与自有节点轨的处理差异、以及节点掉线时怎么排查。旧 xboard-node 的切换见 [一键切换](docs/install-mboard-node.md)。
 
 ## 可以做什么
 
