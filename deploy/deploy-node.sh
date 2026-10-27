@@ -40,6 +40,9 @@ Usage: sh deploy-node.sh --machine-id N --token TOKEN [options]
   --sha-core HEX     expected sha256 of the sing-box core (default: published release)
   --core-version V   core version to record when the panel does not set one
   --force            reinstall over an existing installation after a backup
+  --upgrade          replace only the binaries of an installed node and restart
+                     it: identity, token and applied config are untouched, so no
+                     --machine-id or --token is needed
   --dry-run          run every check, then stop before touching the system
   --help             show this text
 
@@ -185,11 +188,109 @@ cleanup() {
 }
 
 # --- main -------------------------------------------------------------------
+# Binaries-only upgrade of an installed node. Identity, token and the applied
+# config stay as they are, so this needs no panel round trip and cannot rotate a
+# credential or start a config revision. The agent restart still restarts its
+# sing-box child, so existing proxy connections drop and reconnect.
+upgrade_mode() {
+    [ -e "$WORK/identity.json" ] || die "no managed installation at $WORK; run without --upgrade to deploy one"
+    [ -e "$WORK/agent.json" ] || die "review $WORK/agent.json"
+    plain_file "$WORK/identity.json" && plain_file "$WORK/agent.json" || die "review the install under $WORK"
+    MACHINE_ID=$(jq -r '.machine_id // empty' "$WORK/identity.json") || die "review $WORK/identity.json"
+    installed_panel=$(jq -r '.panel_url // empty' "$WORK/identity.json") || die "review $WORK/identity.json"
+    valid_id "$MACHINE_ID" || die "review the machine number in $WORK/identity.json"
+    PANEL=${PANEL_OVERRIDE:-$installed_panel}
+    PANEL=${PANEL%/}
+    valid_origin "$PANEL" || die "review the panel origin in $WORK/identity.json"
+    current=$(sha_of "$WORK/mboard-node")
+
+    secure_dir "$STAGE_ROOT"
+    mkdir "$STAGE_ROOT/install.lock" 2>/dev/null || die "another run owns $STAGE_ROOT/install.lock"
+    LOCKED=1
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' HUP TERM
+    STAGE=$(mktemp -d "$STAGE_ROOT/run.XXXXXX"); chmod 700 "$STAGE"
+    mkdir "$STAGE/bin"
+
+    if [ -n "$BINARY_DIR" ]; then
+        for pair in mboard-node:agent sing-box:core; do
+            src=$BINARY_DIR/${pair%%:*}; [ -f "$src" ] || die "missing $src"
+            cp "$src" "$STAGE/bin/${pair##*:}"
+        done
+    else
+        say "downloading the released node and core from $PANEL/downloads"
+        download "$PANEL/downloads/mboard-node-linux-amd64" "$STAGE/bin/agent" || die 'could not download the node binary'
+        download "$PANEL/downloads/sing-box-linux-amd64" "$STAGE/bin/core" || die 'could not download the sing-box core'
+    fi
+    verify_sha "$STAGE/bin/agent" "$SHA_AGENT" || die 'the node binary does not match the expected sha256'
+    verify_sha "$STAGE/bin/core" "$SHA_CORE" || die 'the core does not match the expected sha256'
+    chmod 700 "$STAGE/bin/agent" "$STAGE/bin/core"
+    AGENT_DIGEST=$(sha_of "$STAGE/bin/agent"); CORE_DIGEST=$(sha_of "$STAGE/bin/core")
+    [ -n "$SHA_AGENT" ] || warn "no pinned digest for the node binary; installing $AGENT_DIGEST"
+    target_version=$("$STAGE/bin/agent" version) || die 'the new node binary does not report a version'
+    current_version=$("$WORK/mboard-node" version 2>/dev/null || echo unknown)
+    say "installed $current_version ($current), target $target_version ($AGENT_DIGEST)"
+
+    # The new binaries must accept what is already on disk before anything moves.
+    "$STAGE/bin/agent" validate -config "$WORK/agent.json" > "$STAGE/agent-check.log" 2>&1 \
+        || die "the new node rejects the installed agent.json: $(tail -3 "$STAGE/agent-check.log" | tr '\n' ' ')"
+    applied="$WORK/server.json"
+    [ -f "$applied" ] || applied=$(jq -r '.config_path // empty' "$WORK/agent.json" 2>/dev/null || true)
+    if [ -n "$applied" ] && [ -f "$applied" ]; then
+        "$STAGE/bin/core" check -c "$applied" > "$STAGE/core-check.log" 2>&1 \
+            || die "the new core rejects the applied config: $(tail -3 "$STAGE/core-check.log" | tr '\n' ' ')"
+        say "preflight passed against the applied config at $applied"
+    else
+        warn 'no applied config found on disk; skipping the core check'
+    fi
+
+    if [ "$DRY" = 1 ]; then
+        say "dry run: machine $MACHINE_ID would move from $current_version to $target_version"
+        say 'nothing was written outside the staging directory'
+        return 0
+    fi
+    if [ "$current" = "$AGENT_DIGEST" ] && service_active; then
+        say "machine $MACHINE_ID already runs $target_version with this exact binary"
+        return 0
+    fi
+
+    BACKUP=$BACKUP_ROOT/upgrade-$(date -u +%Y%m%dT%H%M%SZ)
+    secure_dir "$BACKUP_ROOT"; mkdir "$BACKUP"; chmod 700 "$BACKUP"
+    cp -p "$WORK/mboard-node" "$BACKUP/mboard-node" 2>/dev/null || true
+    cp -p "$WORK/sing-box" "$BACKUP/sing-box" 2>/dev/null || true
+    chmod 600 "$BACKUP"/* 2>/dev/null || true
+    say "restarting mboard-node; proxy connections on this machine will reconnect"
+
+    TOUCHED=1
+    service_stop
+    install -m 700 "$STAGE/bin/agent" "$WORK/mboard-node"
+    install -m 700 "$STAGE/bin/core" "$WORK/sing-box"
+    systemctl start mboard-node >/dev/null 2>&1 || die "the node service did not start; roll back with: install -m 700 $BACKUP/mboard-node $WORK/mboard-node && systemctl start mboard-node"
+    systemctl is-enabled --quiet mboard-node || systemctl enable mboard-node >/dev/null 2>&1 || true
+
+    deadline=$(($(date +%s) + 90)); healthy=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 3
+        service_active || die "the upgraded node stopped; roll back with the binaries in $BACKUP"
+        running=$("$WORK/mboard-node" version 2>/dev/null || echo unknown)
+        if [ "$running" = "$target_version" ]; then healthy=1; break; fi
+    done
+    [ "$healthy" = 1 ] || die "the node did not report $target_version; review journalctl -u mboard-node and the backup at $BACKUP"
+
+    say ""
+    say "machine $MACHINE_ID upgraded: $current_version -> $target_version"
+    say "  node:    $WORK (node $AGENT_DIGEST, core $CORE_DIGEST)"
+    say "  backup:  $BACKUP"
+    say "  verify:  journalctl -u mboard-node -n 30; check telemetry_ready in the panel"
+    say "  revert:  systemctl stop mboard-node && install -m 700 $BACKUP/mboard-node $WORK/mboard-node && install -m 700 $BACKUP/sing-box $WORK/sing-box && systemctl start mboard-node"
+}
+
 main() {
     PANEL=${MBOARD_PANEL:-$PANEL_DEFAULT}
     MACHINE_ID=${MBOARD_MACHINE_ID:-}
     TOKEN=${MBOARD_NODE_TOKEN:-}
-    BINARY_DIR=; SHA_AGENT=$AGENT_SHA256; SHA_CORE=$CORE_SHA256; SHA_PINNED=0; CORE_VERSION=; FORCE=0; DRY=0
+    BINARY_DIR=; SHA_AGENT=$AGENT_SHA256; SHA_CORE=$CORE_SHA256; SHA_PINNED=0; CORE_VERSION=; FORCE=0; UPGRADE=0; DRY=0
     STAGE=; LOCKED=0; TOUCHED=0; ACTIVATED=0
 
     while [ "$#" -gt 0 ]; do
@@ -207,6 +308,7 @@ main() {
                 esac
                 shift 2;;
             --force) FORCE=1; shift;;
+            --upgrade) UPGRADE=1; shift;;
             --dry-run) DRY=1; shift;;
             --help|-h) usage; return 0;;
             *) usage >&2; die "unknown option: $1";;
@@ -216,10 +318,6 @@ main() {
     [ "$(id -u)" = 0 ] || die 'run as root'
     [ "$(uname -s)" = Linux ] || die 'this path targets Linux'
     [ "$(uname -m)" = x86_64 ] || [ -n "$BINARY_DIR" ] || die 'the published binaries are amd64; pass --binary-dir with a local build for this architecture'
-    PANEL=${PANEL%/}
-    valid_origin "$PANEL" || die 'set --panel to an HTTPS origin such as https://panel.example'
-    valid_id "$MACHINE_ID" || die 'set --machine-id to the machine number from the panel'
-    token_shape "$TOKEN" || die 'set --token to the panel or original machine credential (32 or 64 characters)'
     [ -z "$SHA_AGENT" ] || hex_any "$SHA_AGENT" || die '--sha-agent must be a sha256 hex digest'
     [ -z "$SHA_CORE" ] || hex_any "$SHA_CORE" || die '--sha-core must be a sha256 hex digest'
     # A local build is not the published release, so an explicit digest is the
@@ -229,6 +327,25 @@ main() {
 
     install_deps
     command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die 'systemd is required; the OpenRC path lives in install-mboard-node.sh'
+
+    # Upgrade keeps the installed identity, so it takes the panel origin and the
+    # machine number from disk instead of the command line.
+    if [ "$UPGRADE" = 1 ]; then
+        PANEL_OVERRIDE=$PANEL
+        PANEL_OVERRIDE=${PANEL_OVERRIDE%/}
+        if [ -n "$PANEL_OVERRIDE" ] && [ "$PANEL_OVERRIDE" != "$PANEL_DEFAULT" ]; then
+            valid_origin "$PANEL_OVERRIDE" || die 'set --panel to an HTTPS origin such as https://panel.example'
+        else
+            PANEL_OVERRIDE=
+        fi
+        upgrade_mode
+        return $?
+    fi
+
+    PANEL=${PANEL%/}
+    valid_origin "$PANEL" || die 'set --panel to an HTTPS origin such as https://panel.example'
+    valid_id "$MACHINE_ID" || die 'set --machine-id to the machine number from the panel'
+    token_shape "$TOKEN" || die 'set --token to the panel or original machine credential (32 or 64 characters)'
 
     # One managed identity per machine: reruns reconcile, --force replaces.
     if [ -e "$WORK/agent.json" ] && [ ! -e "$WORK/identity.json" ] && [ "$FORCE" = 0 ]; then
@@ -293,10 +410,10 @@ main() {
     fi
     verify_sha "$STAGE/bin/agent" "$SHA_AGENT" || die 'the node binary does not match the expected sha256'
     verify_sha "$STAGE/bin/core" "$SHA_CORE" || die 'the core does not match the expected sha256'
+    chmod 700 "$STAGE/bin/agent" "$STAGE/bin/core"
     AGENT_DIGEST=$(sha_of "$STAGE/bin/agent"); CORE_DIGEST=$(sha_of "$STAGE/bin/core")
     [ -n "$SHA_AGENT" ] || warn "no pinned digest for the node binary; installing $AGENT_DIGEST"
     [ -n "$SHA_CORE" ] || warn "no pinned digest for the core; installing $CORE_DIGEST"
-    chmod 700 "$STAGE/bin/agent" "$STAGE/bin/core"
 
     # 3. Layer in the TLS material the bundle carries, then preflight the exact
     #    config the core will load with the paths rewritten to staging.

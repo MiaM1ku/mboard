@@ -40,6 +40,18 @@ curl -fsSL https://panel.example/downloads/deploy-node.sh | sh -s -- \
 
 重复执行是安全的：同一台机器的同一份身份会被复用并重新核对，不会产生第二套凭据。已接入的机器带着旧令牌重跑会收到 `NODE_ENROLLED`/`NODE_CREDENTIAL_CHANGED`，此时按提示先轮换令牌。
 
+### 升级已装节点的二进制
+
+已经装好的机器只换二进制、不动身份和配置时用 `--upgrade`，不需要机器号也不需要令牌——它从 `/opt/mboard-node/identity.json` 读面板 origin 和机器号，从 `agent.json` 读令牌：
+
+```sh
+curl -fsSL https://panel.example/downloads/deploy-node.sh | sh -s -- --upgrade
+```
+
+它会下载发布版、校验摘要、用新的 agent 校验现有 `agent.json`、用新的核心校验已应用到磁盘的配置，然后备份旧二进制、重启服务，并确认进程报出的版本号等于目标版本。`--dry-run` 只做下载和预检，打印当前版本与目标版本。
+
+重启会连同 sing-box 子进程一起重启，这台机器上的代理连接会断开重连，所以分批做、避开高峰。失败时脚本打印一条完整的回退命令，旧二进制在 `/opt/mboard-node-backups/upgrade-*`。
+
 从旧 xboard-node 切换、需要停旧服务并清理旧启动入口的，用 [install-mboard-node.sh](install-mboard-node.md)。
 
 ## 二、两类节点现在怎么处理
@@ -125,7 +137,7 @@ find "$spool" -maxdepth 1 -name '*.json' -print0 | xargs -0 -P 8 -n 1 sh -c '
 
 ### 已修复的实现问题（agent 0.2.2）
 
-`/downloads/mboard-node-linux-amd64` 当前是 0.2.2。0.2.2 只改投递行为，配置、`traffic_labels` 和 journal 格式不变，可直接读 0.2.1 的 journal 与队列。还跑 0.2.1 的节点仍会按老逻辑卡死，需要按上面的流程外部排空，或升级到 0.2.2。
+`/downloads/mboard-node-linux-amd64` 当前是 0.2.2。0.2.2 只改投递行为，配置、`traffic_labels` 和 journal 格式不变，可直接读 0.2.1 的 journal 与队列。还跑 0.2.1 的节点仍会按老逻辑卡死，需要按上面的流程外部排空，或升级到 0.2.2——升级就是每台机器跑一次上面的 `--upgrade`。
 
 0.2.2 的投递循环会区分错误的性质：
 
