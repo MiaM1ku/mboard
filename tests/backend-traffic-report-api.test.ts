@@ -186,12 +186,19 @@ describe('traffic report HTTP authorization and safe DTOs', () => {
 });
 
 describe('traffic report preview and durable enqueue HTTP contract', () => {
-  test('authorized preview exposes account email only in its private report, without enqueue', async () => {
+  test('authorized preview labels accounts by name inside its private report, without enqueue', async () => {
     const f = fixture(); f.setNow(trafficAt);
     expect((await f.traffic('preview-data', [f.record()])).status).toBe(200); f.setNow(reportAt);
     const r = await f.admin('preview', 'POST', { kind: 'daily' });
     expect(r.status).toBe(200); expect(r.data).toMatchObject({ kind: 'daily', start_date: '2026-10-13', end_date: '2026-10-13', timezone: 'Asia/Shanghai' });
-    expect(r.data.users[0]).toMatchObject({ label: sourceEmail, bytes: '100' }); expect(r.data.message).toContain(sourceEmail); safe(r.text); expect(f.countJobs()).toBe(0);
+    expect(r.data.users[0]).toMatchObject({ label: 'user', bytes: '100' }); expect(r.data.message).toContain('user: 100 B'); expect(r.text).not.toContain(sourceEmail); safe(r.text); expect(f.countJobs()).toBe(0);
+  });
+  test('empty account name falls back to the email label in the private report', async () => {
+    const f = fixture(); f.setNow(trafficAt);
+    expect((await f.traffic('preview-data', [f.record()])).status).toBe(200);
+    f.db.exec("UPDATE users SET name='' WHERE id=1"); f.setNow(reportAt);
+    const r = await f.admin('preview', 'POST', { kind: 'daily' });
+    expect(r.status).toBe(200); expect(r.data.users[0]).toMatchObject({ label: sourceEmail, bytes: '100' }); expect(r.data.message).toContain(sourceEmail);
   });
   test('all preview kinds use the fixed Shanghai calendar, test kind is synthetic', async () => {
     const f = fixture(); f.setNow(reportAt);
@@ -217,7 +224,7 @@ describe('traffic report preview and durable enqueue HTTP contract', () => {
     expect(Object.keys(r.data).sort()).toEqual(['attempts', 'created_at', 'end_date', 'error_code', 'http_status', 'id', 'kind', 'next_attempt_at', 'period_key', 'start_date', 'status', 'timezone']);
     safe(r.text); expect(r.text).not.toContain(sourceEmail); expect(r.data.message).toBeUndefined();
     const job = f.db.query('SELECT message,status,attempts FROM traffic_report_runs WHERE id=?').get(r.data.id) as any;
-    expect(job.status).toBe('queued'); expect(job.attempts).toBe(0); expect(job.message).toContain(sourceEmail);
+    expect(job.status).toBe('queued'); expect(job.attempts).toBe(0); expect(job.message).toContain('user: 100 B'); expect(job.message).not.toContain(sourceEmail);
     const list = await f.admin('runs'); expect(list.status).toBe(200); expect(list.data).toEqual([r.data]); safe(list.text); expect(list.text).not.toContain(sourceEmail); expect(list.text).not.toContain('message');
   });
   test('test enqueue saves a synthetic labeled message rather than any source account email', async () => {
