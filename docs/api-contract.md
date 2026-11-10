@@ -31,7 +31,7 @@ User = `{id:number,email,name,role:'admin'|'user',enabled:boolean,created_at,upl
 - `POST /api/v1/tickets/:id/messages` `{body}` -> Ticket.
 - `PATCH /api/v1/tickets/:id` `{status:'closed'}` -> Ticket.
 - `POST /api/v1/me/subscription/rotate` -> `{subscription_token,subscription_url?:string}`.
-- `GET /s/:token` -> sing-box client JSON config. `HEAD` applies the same authorization checks and sends the corresponding headers. Authorized enabled nodes only. Client config uses independently generated UUID credentials and includes selector + urltest + direct. Subscription supports protocol selected in node, real configured endpoint and TLS.
+- `GET /s/:token` -> sing-box client JSON config. `HEAD` applies the same authorization checks and sends the corresponding headers. Authorized enabled nodes on activated machines are always listed. Reported core/telemetry readiness and heartbeat recency only drive the live status views (node list, overview and online counters). Client config uses independently generated UUID credentials and includes selector + urltest + direct. Subscription supports protocol selected in node, real configured endpoint and TLS.
 
 ## Admin
 - `GET /api/v1/admin/overview?days=1|7|30` -> `{users,enabled_users,nodes,online_nodes,machines,online_machines,upload_bytes,download_bytes,traffic,recent_machines,days,range,today,month,active_users,pools,top_nodes,top_users,attention_machines}`. `today` and `month` are UTC byte pairs. `top_nodes` is `[{id,name,parent_name,machine_names,online,users,upload_bytes,download_bytes}]` sorted by total. `top_users` is the first ten accounts by range bytes with `quota_bytes` and lifetime `total_bytes`. `attention_machines` lists enabled machines without a live heartbeat.

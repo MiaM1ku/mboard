@@ -65,20 +65,23 @@ describe('restored runtime REST integration', () => {
   });
   test('pending nodes stay out of subscriptions until activation and valid ready heartbeat makes live counts accurate', async () => {
     const f=fixture(); expect((await f.request('/api/v1/nodes','GET',undefined,f.userCookie)).data).toEqual([]);
+    expect((await f.request('/s/'+'a'.repeat(64))).text).not.toContain('ss.example.test');
     let overview=(await f.request('/api/v1/admin/overview','GET',undefined,f.adminCookie)).data;
     expect(overview).toMatchObject({nodes:2,machines:1,online_nodes:0,online_machines:0});
     const c=f.activate(); const hb=await f.heartbeat(c.revision); expect(hb.status).toBe(200); expect(hb.data.config_revision).toBe(c.revision);
+    expect((await f.request('/s/'+'a'.repeat(64))).text).toContain('ss.example.test');
     overview=(await f.request('/api/v1/admin/overview','GET',undefined,f.adminCookie)).data;
     expect(overview).toMatchObject({nodes:2,machines:1,online_nodes:2,online_machines:1});
     expect(overview.recent_machines[0]).toMatchObject({runtime:true,active:true,core_ready:true,telemetry_ready:true,applied_revision:c.revision,config_revision:c.revision,online:true});
     expect((await f.request('/api/v1/overview','GET',undefined,f.userCookie)).data.nodes).toHaveLength(2);
     expect(JSON.stringify(overview)).not.toContain(privateKey); expect(JSON.stringify(overview)).not.toContain(f.token);
   });
-  test('wrong revision and failed readiness withdraw runtime endpoints', async () => {
+  test('wrong revision and failed readiness withdraw live status while the subscription keeps authorized nodes', async () => {
     const f=fixture();const c=f.activate(); expect((await f.heartbeat(c.revision+1)).status).toBe(200);
     expect((await f.request('/api/v1/nodes','GET',undefined,f.userCookie)).data).toEqual([]);
-    expect((await f.request('/s/'+'a'.repeat(64))).text).not.toContain('ss.example.test');
+    expect((await f.request('/s/'+'a'.repeat(64))).text).toContain('ss.example.test');
     await f.heartbeat(c.revision,false);expect((await f.request('/api/v1/admin/overview','GET',undefined,f.adminCookie)).data.online_machines).toBe(0);
+    expect((await f.request('/s/'+'a'.repeat(64))).text).toContain('ss.example.test');
     await f.heartbeat(c.revision);expect((await f.request('/api/v1/nodes','GET',undefined,f.userCookie)).data).toHaveLength(2);
   });
   test('heartbeat rejects unsafe integers, unexpected fields and nonboolean readiness without writes', async () => {
@@ -86,20 +89,20 @@ describe('restored runtime REST integration', () => {
     for(const body of [{...base,uptime_seconds:Number.MAX_SAFE_INTEGER+1},{...base,config_revision:-1},{...base,core_ready:1},{...base,applied_revision:1}]) expect((await f.node('heartbeat','POST',body)).status).toBe(400);
     expect((f.db.query('SELECT last_seen_at FROM runtime_machines WHERE id=2').get() as any).last_seen_at).toBeNull();
   });
-  test('stale telemetry stops live counts and subscription publication', async () => {
+  test('stale telemetry stops live counts while the subscription keeps authorized nodes', async () => {
     const f=fixture();f.activate();await f.heartbeat();f.db.query('UPDATE runtime_machines SET last_seen_at=?').run(new Date(Date.now()-120000).toISOString());
     expect((await f.request('/api/v1/admin/overview','GET',undefined,f.adminCookie)).data).toMatchObject({online_nodes:0,online_machines:0});
-    expect((await f.request('/s/'+'a'.repeat(64))).text).not.toContain('ss.example.test');
+    expect((await f.request('/s/'+'a'.repeat(64))).text).toContain('ss.example.test');
     expect((await f.request('/api/v1/nodes','GET',undefined,f.userCookie)).data).toEqual([]);
   });
-  test('a new compiled revision invalidates old ready health until that exact revision is applied', async () => {
+  test('a new compiled revision clears live status while the subscription keeps authorized nodes', async () => {
     const f=fixture();const c=f.activate();await f.heartbeat(c.revision);
     f.db.exec('INSERT INTO user_groups VALUES(2,1)'); const next=await f.node('config');expect(next.data.revision).toBeGreaterThan(c.revision);
     expect((await f.request('/api/v1/admin/overview','GET',undefined,f.adminCookie)).data.online_machines).toBe(0);
-    expect((await f.request('/s/'+'a'.repeat(64))).text).not.toContain('ss.example.test');
+    expect((await f.request('/s/'+'a'.repeat(64))).text).toContain('ss.example.test');
     await f.heartbeat(next.data.revision);expect((await f.request('/api/v1/admin/overview','GET',undefined,f.adminCookie)).data.online_machines).toBe(1);
   });
-  test('disabled restored aliases stay absent from user nodes and live subscriptions', async () => {
+  test('disabled restored aliases stay absent from user nodes and subscriptions', async () => {
     const f=fixture();f.archive('v2_server',12,{id:12,parent_id:10,type:'shadowsocks',name:'Disabled alias',host:'disabled.example.test',port:445,enabled:0,show:1,group_ids:[1],protocol_settings:{cipher:'2022-blake3-aes-128-gcm'}});restoreRuntime(f.db);f.activate();await f.heartbeat();
     const nodes=(await f.request('/api/v1/nodes','GET',undefined,f.userCookie)).data;
     expect(nodes.map((n:any)=>n.id)).toEqual([10,11]);expect((await f.request('/api/v1/overview','GET',undefined,f.userCookie)).data.nodes.map((n:any)=>n.id)).toEqual([10,11]);

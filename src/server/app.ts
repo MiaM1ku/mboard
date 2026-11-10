@@ -184,12 +184,13 @@ export function createApp(options: AppOptions = {}) {
     if (n.tls) result.tls = { enabled: true, server_name: n.server_name || n.host };
     return result;
   }
+  // Subscription content follows authorization and machine activation. Reported readiness and
+  // heartbeat recency stay in the live status views (node list, overview, online counters).
   function subscriptionEndpoints(u: Row): SubscriptionEndpoint[] {
-    const healthyNodes=new Set(runtimeNodes().filter(n=>n.online).map(n=>n.id));
     return [...authorizedNodes(u).map(n => {
       const native=outbound(n,u);const {type,tag,server,server_port,uuid,password,...settings}=native;
       return {id:n.id,name:`node-${n.id}`,protocol:n.protocol,host:n.host,port:n.port,credential:u.credential,settings,entry_ips:entryList(n.entry_ips)};
-    }),...runtimeEndpoints(db,u.id).filter(e=>healthyNodes.has(Number(String(e.id).split(':')[0])))];
+    }),...runtimeEndpoints(db,u.id)];
   }
   // Cloudflare stamps CF-Connecting-IP; nginx appends its own peer behind the forwarded client.
   // Only the template DNS ECS hint reads this, and the renderer keeps nothing but a validated public IPv4 /24.

@@ -487,7 +487,9 @@ function clientSettings(ps: Row, protocol: string, n: Row): Row {
 export function authorizedEndpoints(db: Database, userID: number): RuntimeEndpoint[] {
   const u=db.query('SELECT * FROM users WHERE id=?').get(userID) as Row;if(!u)return [];
   const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));const activeRoots=new Set<number>();const entries=runtimeEntries(db);
-  for(const b of db.query("SELECT b.node_id FROM runtime_bindings b JOIN runtime_machines m ON m.id=b.machine_id WHERE m.active=1 AND m.state='active' AND m.core_ready=1 AND m.telemetry_ready=1").all() as Row[]) {const n=ns.get(Number(b.node_id));if(n)activeRoots.add(Number(rootFor(ns,n).id));}
+  // Activation is the admin-controlled gate for client credentials. Reported core/telemetry readiness
+  // and heartbeat recency belong to live status views, so a node that goes offline keeps its endpoints.
+  for(const b of db.query("SELECT b.node_id FROM runtime_bindings b JOIN runtime_machines m ON m.id=b.machine_id WHERE m.active=1 AND m.state='active'").all() as Row[]) {const n=ns.get(Number(b.node_id));if(n)activeRoots.add(Number(rootFor(ns,n).id));}
   const ranked:{endpoint:RuntimeEndpoint;key:[number,number,number,number]}[]=[];
   for(const n of all) {
     const root=rootFor(ns,n);if(!yes(n.show)||!yes(root.enabled)||!eligible(db,u,n)||!activeRoots.has(Number(root.id)))continue;

@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { openDatabase } from '../src/server/database';
-import { restoreRuntime, compileMachine, authorizedEndpoints, activateMachine, provisionMachineToken, authenticateRuntimeMachine, heartbeatRuntimeMachine, deriveUUID, shadowsocksServerPSK, RuntimeCompileError } from '../src/server/runtime';
+import { restoreRuntime, compileMachine, authorizedEndpoints, activateMachine, deactivateMachine, provisionMachineToken, authenticateRuntimeMachine, heartbeatRuntimeMachine, deriveUUID, shadowsocksServerPSK, RuntimeCompileError } from '../src/server/runtime';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
@@ -77,6 +77,16 @@ describe('independent runtime restoration',()=>{
   test('activation requires verified correct revision, fresh token and both readiness probes',()=>{
     const {db}=fixture();restoreRuntime(db);const c=compileMachine(db,2);expect(()=>activateMachine(db,2,{verified:true,appliedRevision:c.revision,coreReady:true,telemetryReady:true})).toThrow('fresh-token-required');provisionMachineToken(db,2);
     expect(()=>activateMachine(db,2,{verified:true,appliedRevision:999999,coreReady:true,telemetryReady:true})).toThrow('activation-probe-required');expect(()=>activateMachine(db,2,{verified:true,appliedRevision:c.revision,coreReady:true,telemetryReady:false})).toThrow('activation-probe-required');expect(authorizedEndpoints(db,1)).toHaveLength(0);db.close();
+  });
+  test('reported readiness leaves authorized endpoints intact while deactivation withdraws them',()=>{
+    const {db}=fixture();restoreRuntime(db);const c=activate(db);
+    expect(authorizedEndpoints(db,1)).toHaveLength(1);
+    heartbeatRuntimeMachine(db,2,{applied_revision:c.revision,core_ready:false,telemetry_ready:false});
+    expect(authorizedEndpoints(db,1)).toHaveLength(1);
+    heartbeatRuntimeMachine(db,2,{applied_revision:c.revision,core_ready:false,telemetry_ready:true});
+    expect(authorizedEndpoints(db,1)).toHaveLength(1);
+    deactivateMachine(db,2);
+    expect(authorizedEndpoints(db,1)).toHaveLength(0);db.close();
   });
   test('malformed config fails sanitized and leaves machine pending',()=>{
     const {db}=fixture('vless',{protocol_settings:{tls:2,reality_settings:{private_key:'SECRET-DO-NOT-LOG'}}});restoreRuntime(db);
