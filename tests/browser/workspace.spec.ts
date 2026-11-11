@@ -249,7 +249,7 @@ test("桌面和移动布局、双主题、页面能力文案", async ({ page }) 
   await page.getByRole("button", { name: "切换深色主题" }).click();
   await expect(page.locator("html")).toHaveClass("dark");
   await invariant(page);
-  await expect(page.locator(".kpi-card").first()).toHaveCSS("background-color", "rgb(24, 47, 46)");
+  await expect(page.locator(".kpi-card").first()).toHaveCSS("background-color", "rgb(17, 26, 43)");
   await page.screenshot({ path: "docs/review/user-dark.png", fullPage: true, animations: "disabled" });
   expect(errors).toEqual([]);
   const metrics = await page.evaluate(() => {

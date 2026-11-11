@@ -699,6 +699,7 @@ strong {
 }
 .field {
   display: grid;
+  align-content: start;
   gap: 7px;
   min-width: 0;
 }
@@ -1687,6 +1688,13 @@ strong {
   font-size: 12.5px;
   margin: 4px 0;
 }
+.mb-custom-record > .mb-custom-meta {
+  display: block;
+  margin: 2px 0 0;
+}
+.data-table td .mb-custom-actions {
+  flex-wrap: nowrap;
+}
 .mb-custom-actions {
   display: flex;
   gap: 8px;
@@ -1769,9 +1777,10 @@ strong {
   gap: 22px;
 }
 .mb-custom-content-tabs {
-  display: inline-flex;
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
   gap: 4px;
-  margin-bottom: 20px;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -2422,6 +2431,9 @@ body,
   .kpi-grid,
   .kpi-grid.is-three {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .kpi-grid > .card:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
   .dashboard-grid {
     grid-template-columns: 1fr;

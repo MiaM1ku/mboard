@@ -1,7 +1,7 @@
 ---
 name: mboard-design
 description: mboard 的用户和管理界面，覆盖仪表盘、密集列表、主从编辑器和登录表单，以清晰的数据层级服务桌面和移动阅读。
-version: motion-2026-10-13
+version: aurora-2026-11-11
 ---
 
 # mboard design
@@ -12,12 +12,12 @@ version: motion-2026-10-13
 [MUST] 每个页面用一个 h1 表达页面主题。
 
 ## 2. 品牌和读者
-[SHOULD] Decision：用深墨导航、浅灰绿画布、青绿操作表达独立的工具品牌。来源：独立 mboard 重写要求和高密度管理界面的阅读需求。
+[SHOULD] Decision：用冷灰蓝画布、白色内容面、青绿主操作和靛蓝辅助色表达独立的工具品牌；订阅主卡和登录侧栏使用青绿到靛蓝的渐变（--hero）。来源：2026-11 界面重设计要求。
 [SHOULD] Decision：标题和数据用明显的尺寸对比，辅助信息保持 12px 以上。来源：原界面的 11px 元数据需要更清晰的阅读层级。
 [MUST] 文案直接说明能力、结果和下一步操作。空状态给出可执行的入口。风险文案准确说明操作后果。
 
 ## 3. 页面结构和构图
-[SHOULD] Decision：桌面导航固定宽 232px，主区域用顶部路径、页面标题和内容组成。来源：现有 Shell 的分区导航和桌面阅读密度。
+[SHOULD] Decision：桌面导航固定宽 264px，使用浅色（深色主题为深蓝）侧栏，菜单按任务分组（总览、网络资源、用户与权限、内容与支持、系统），底部是用户卡片和退出按钮。主区域由吸顶毛玻璃顶栏（路径、管理员的用户/管理面板切换、主题按钮）、页面标题和内容组成，内容区以 24px 纵向间距排布。来源：2026-11 界面重设计。
 [SHOULD] 仪表盘首屏先呈现主题和核心数值，然后呈现时间序列和相关列表。次要信息放在右侧或页面下半部。
 [SHOULD] 密集列表用标题操作区、工具栏、可横向滚动的数据表和页脚组成。
 [SHOULD] 主从编辑器以清晰标签分组，把动作放在表单末尾。长表单和弹窗各自滚动。
@@ -64,6 +64,7 @@ version: motion-2026-10-13
 | 状态 | Badge, EmptyState, ErrorState | src/web/ui.tsx | 状态反馈 | 已实现 |
 | 浮层 | Modal | src/web/ui.tsx | 对话框和主从编辑器 | 已实现 |
 | 数据 | .data-table, .table-wrap, .kpi-grid, .kpi-value, .mono | src/web/styles.css | 表格和数值 | 已实现 |
+| 图标徽标 | StatCard（kpi-card、kpi-icon、kpi-link）、PasswordInput、.panel-switch、.sidebar-user | src/web/ui.tsx, App.tsx, styles.css | 指标卡、密码显隐、面板切换、侧栏用户 | 已实现 |
 | 动效 | --motion-fast=160ms, --motion-control=240ms, --motion-enter=560ms, --motion-data=760ms, --motion-ease=cubic-bezier(0.22,1,0.36,1), --motion-exit-ease=cubic-bezier(0.4,0,1,1) | src/web/styles.css | 页面、控件、表面与浮层 | 已实现 |
 | 动态数值 | AnimatedValue(value, format?, duration?); useReducedMotion | src/web/motion.tsx | 真实数值、最终值可读、减少动态效果 | 已实现 |
 | 图表 | TrafficChart | src/web/TrafficChart.tsx | 按日期的字节时间序列 | 已实现 |

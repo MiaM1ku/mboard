@@ -7,7 +7,7 @@ export function openDatabase(path = ':memory:') {
   const existed = path === ':memory:' || existsSync(path);
   const db = new Database(path, { create: true, strict: true });
   if (!existed) chmodSync(path, 0o600);
-  db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`);
+  db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=33554432;`);
   // Numbered, transactionally applied schema migrations. No fixtures or default accounts.
   const version = (db.query('PRAGMA user_version').get() as any).user_version;
   if (version > 4) throw new Error('Database schema is newer than this server');
