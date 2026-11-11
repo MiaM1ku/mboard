@@ -14,8 +14,8 @@ Result: pass。
 ## 证据
 
 - `bun run build`：严格 TypeScript 检查和 Vite 生产构建通过。
-- `bun run test`：30 个服务端及迁移测试通过，272 次断言。
-- `bun run test:e2e`：5 个浏览器场景通过。场景覆盖 14 个页面的桌面和窄屏布局、双主题切换、初始化、真实用户问题会话、管理员回复、订阅下载、管理 CRUD、一次性令牌清理、站点展示和键盘操作。
+- `bun run test`：275 个服务端及迁移测试通过（273 通过、2 个需要固定核心的可选用例跳过）。
+- `bun run test:e2e`：13 个浏览器场景通过。场景覆盖管理端 10 个和用户端 6 个页面的桌面和窄屏布局、双主题切换、初始化、真实用户问题会话、管理员回复、订阅下载、管理 CRUD、一次性令牌清理、站点展示、连接日志筛选和键盘操作。
 - `bun audit`：依赖审计通过。
 - Go 节点的 `go test -race ./...`、`go vet ./...` 和 `go build` 通过。
 - `scripts/proxy-smoke.ts`：实际 Go 节点、Bun 面板和官方 sing-box 1.14.3 完成配置下发、心跳、VLESS 和 Shadowsocks HTTP 转发、队列确认和重复批次去重。
@@ -82,6 +82,35 @@ Result: pass。
 - [首轮结果](review/initial/admin-1440.png)
 
 首轮结果保存用于记录修复前的真实产物。复核使用相同输入和视口，最终结果保存为上面的当前截图。
+
+## 连接日志与上次活跃（2026-11-11 轮）
+
+Scenario: 管理端「用户授权」「节点管理」的上次活跃列，新增「连接日志」页。
+Input: 浏览器测试沿用首段用例创建的访问分组、接入机器、节点和用户，用机器令牌向 `POST /api/node/v1/connections` 写入 2 条小时聚合记录：`video.example.com:443` TCP 3 次（来源 203.0.113.9）与 `dns.example.com:53` UDP 7 次（来源为空）。首段用例的流量批次同时驱动两个列表的上次活跃列。
+Viewport: 1440 × 900；390 × 844。
+Theme: 浅色和深色。
+Result: pass。
+
+### 证据
+
+- `bun run test`：273 个服务端及迁移测试通过，其中 [backend-connections.test.ts](../tests/backend-connections.test.ts) 新增 18 个用例，覆盖批次幂等、同键合并、逐条跳过、窗口过滤、软行上限、7 天清理、两条活跃来源、管理筛选分页和删除账号后的清理。
+- `bun run test:e2e`：13 个浏览器场景通过。新增场景覆盖筛选与地址栏同步、行内按钮按用户或节点筛选、用户行与节点行到日志页的带筛选跳转、加载更多、筛选无结果和空状态。
+- `bun run build`：严格 TypeScript 检查和 Vite 生产构建通过。
+- Go 节点 0.3.0：`go vet ./...`、`go test -race ./...`、`go build` 通过；解析、聚合、切批、重试、404 探测和 stderr 管道各有用例。
+- 截图：[连接日志桌面浅色](review/connections/light-1440.png)、[连接日志桌面深色](review/connections/dark-1440.png)、[连接日志手机浅色](review/connections/light-390.png)、[连接日志手机深色](review/connections/dark-390.png)。
+
+### 机械检查
+
+1. 连接日志页有 1 个 h1，390px 视口下 document.scrollWidth 等于视口宽度。
+2. 六列表格在 `.table-wrap` 内横向滚动，390px 下 scrollWidth 大于 clientWidth。
+3. 表头与单元格 text-align 一致，次数列两端右对齐。
+4. 筛选写入地址栏查询串，`#/admin/connections?user=<id>` 与 `?node=basic:<id>` 直接打开即带筛选。
+5. 空状态给出下一步：全局空显示节点升级到 0.3.0 后的上报节奏，筛选无结果显示清空筛选入口。
+
+### 观察与修复
+
+- 移动端工具栏改为列向 flex 后，控件继承了 `flex: 1 1 190px` 的基准值；列向布局把该值当作高度，每个筛选控件被拉到 190px 高。改为列向布局下 `flex: 0 0 auto`，控件回到自然高度。
+- 六列在 390px 下被压缩成多行文字。表格改为最小宽 760px，由 `.table-wrap` 承载横向滚动；目标列保留换行以容纳长域名，其余列保持整行。
 
 ## Deviations 和 Open questions
 

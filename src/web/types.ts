@@ -12,6 +12,8 @@ export interface User {
   subscription_token: string;
   subscription_url?: string;
   group_ids?: number[];
+  last_active_at?: string | null;
+  last_active_node?: string | null;
 }
 export interface Group {
   id: number;
@@ -38,6 +40,8 @@ export interface Node {
   server_port?: number;
   machine_ids?: number[];
   state?: string;
+  last_active_at?: string | null;
+  last_active_user?: string | null;
 }
 export interface Machine {
   id: number;
@@ -186,4 +190,28 @@ export interface Overview {
   month_bytes: { upload_bytes: number; download_bytes: number };
   top_nodes: OverviewTopNode[];
   pools: UserPoolStatus[];
+}
+export type ConnectionSource = "runtime" | "basic";
+export type ConnectionNetwork = "tcp" | "udp";
+export interface ConnectionRow {
+  user_id: number;
+  node_id: number;
+  source: ConnectionSource;
+  first_at: string;
+  last_at: string;
+  count: number;
+  target: string;
+  source_ip: string;
+  network: ConnectionNetwork;
+  user: { id: number; name: string; email: string } | null;
+  node: { id: number; name: string; source: ConnectionSource } | null;
+}
+export interface ConnectionPage {
+  rows: ConnectionRow[];
+  total: number;
+  connections: number;
+  targets: number;
+  sources: number;
+  hours: number;
+  retention_days: number;
 }

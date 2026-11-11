@@ -1731,3 +1731,104 @@ body, .topbar, .card, .subscription-card, .toast {
   margin: 2px 0;
 }
 
+
+/* 连接日志：筛选工具栏、目标列配色与活跃时间标记 */
+.mb-custom-conn-toolbar {
+  align-items: flex-end;
+  gap: 14px 16px;
+}
+.mb-custom-conn-toolbar .field {
+  flex: 1 1 190px;
+  min-width: 170px;
+}
+.mb-custom-conn-toolbar > .button {
+  flex: 0 0 auto;
+}
+.mb-custom-conn-summary {
+  padding: 16px 20px 0;
+}
+/* Six columns stay readable and scroll inside .table-wrap instead of crushing. */
+.mb-custom-conn-table {
+  min-width: 760px;
+}
+.mb-custom-conn-table .mb-custom-conn-count {
+  text-align: right;
+}
+.data-table .mb-custom-conn-target {
+  white-space: normal;
+  word-break: break-word;
+}
+.mb-custom-conn-target {
+  color: var(--foreground);
+}
+.mb-custom-conn-port {
+  color: var(--muted-foreground);
+}
+.mb-custom-conn-net {
+  margin-left: 6px;
+}
+.mb-custom-conn-link {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.mb-custom-conn-link:hover {
+  text-decoration: underline;
+}
+.mb-custom-conn-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+.mb-custom-conn-foot .mb-custom-meta {
+  margin: 0;
+}
+.mb-custom-active {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--success);
+  font-weight: 600;
+}
+.mb-custom-active-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  flex: 0 0 auto;
+}
+.mb-custom-active-time {
+  display: inline-block;
+}
+@media (max-width: 620px) {
+  .mb-custom-conn-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  /* A column flex container reads flex-basis as a height, so each control keeps
+     its natural height and full width here. */
+  .mb-custom-conn-toolbar .field {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+  .mb-custom-conn-toolbar > .button {
+    width: 100%;
+  }
+  .mb-custom-conn-summary {
+    padding: 14px 14px 0;
+  }
+  .mb-custom-conn-foot {
+    padding: 14px;
+  }
+}

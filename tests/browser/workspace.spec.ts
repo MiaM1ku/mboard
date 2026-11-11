@@ -209,6 +209,7 @@ test("桌面和移动布局、双主题、页面能力文案", async ({ page }) 
             "machines",
             "pools",
             "groups",
+            "connections",
             "content",
             "tickets",
             "settings",
@@ -806,3 +807,200 @@ test("流量池记录周期额度并在概览显示余量", async ({ page }) => 
   await invariant(page);
 });
 
+
+test("连接日志页展示筛选、跳转与空状态", async ({ page }) => {
+  await login(page);
+  // 用第一段用例保存的机器令牌写入样例连接：同一小时按行聚合。
+  const hour = Math.floor(Date.now() / 1000 / 3600) * 3600;
+  const sample = {
+    user_id: userId,
+    node_id: nodeId,
+    hour,
+    count: 3,
+    first_at: hour + 1,
+    last_at: hour + 30,
+    network: "tcp",
+    source_ip: "203.0.113.9",
+  };
+  const seed = await fetch(`${origin}/api/node/v1/connections`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${machineToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      batch_id: "browser-connections-1",
+      records: [
+        { ...sample, target: "video.example.com:443" },
+        {
+          ...sample,
+          target: "dns.example.com:53",
+          network: "udp",
+          source_ip: "",
+          count: 7,
+          first_at: hour + 120,
+          last_at: hour + 180,
+        },
+      ],
+    }),
+  });
+  expect(seed.ok, `connections: ${await seed.text()}`).toBeTruthy();
+  mkdirSync("docs/review/connections", { recursive: true });
+  for (const [width, height] of [
+    [1440, 900],
+    [390, 844],
+  ] as const) {
+    await page.setViewportSize({ width, height });
+    await page.goto("/#/admin/connections");
+    await expect(
+      page.getByRole("heading", { name: "连接日志", exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(".mb-custom-loading")).toHaveCount(0);
+    await invariant(page);
+    await expect(page.locator(".table-wrap .mb-custom-conn-table")).toHaveCount(1);
+    await expect(page.locator(".mb-custom-conn-summary")).toContainText(
+      "2 条记录 · 10 次连接 · 2 个目标 · 1 个来源 IP",
+    );
+    await expect(
+      page.getByRole("cell", { name: /video\.example\.com:443/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("cell", { name: /dns\.example\.com:53/ }),
+    ).toBeVisible();
+    await expect(page.getByText("UDP", { exact: true })).toBeVisible();
+    await expect(
+      page
+        .locator(".mb-custom-conn-target")
+        .filter({ hasText: "video.example.com" })
+        .locator(".mb-custom-conn-port"),
+    ).toHaveText(":443");
+    if (width === 390) {
+      // 窄视口靠 .table-wrap 横向滚动承载六列，页面本身保持视口宽度。
+      await expect
+        .poll(() =>
+          page
+            .locator(".table-wrap")
+            .evaluate((element) => element.scrollWidth > element.clientWidth),
+        )
+        .toBe(true);
+    }
+    await page.screenshot({
+      path: `docs/review/connections/light-${width}.png`,
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "切换深色主题" }).click();
+    await expect(page.locator("html")).toHaveClass("dark");
+    await invariant(page);
+    await page.screenshot({
+      path: `docs/review/connections/dark-${width}.png`,
+      fullPage: true,
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "切换浅色主题" }).click();
+    await expect(page.locator("html")).not.toHaveClass("dark");
+  }
+  // 筛选与地址栏双向同步：用户、时间范围、搜索框防抖。
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/admin/connections");
+  await expect(page.locator(".mb-custom-loading")).toHaveCount(0);
+  await page
+    .getByLabel("用户", { exact: true })
+    .selectOption({ label: `${reader.name} · ${reader.email}` });
+  await expect(page).toHaveURL(new RegExp(`connections\\?user=${userId}`));
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(2);
+  await page.getByLabel("时间范围").selectOption("1");
+  await expect(page).toHaveURL(/hours=1/);
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(2);
+  await page.getByLabel("时间范围").selectOption("168");
+  await expect(page).toHaveURL(/hours=168/);
+  await page.getByLabel("搜索", { exact: true }).fill("dns.example.com");
+  await expect(page).toHaveURL(/q=dns\.example\.com/);
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(1);
+  await expect(page.locator(".mb-custom-conn-summary")).toContainText(
+    "1 条记录 · 7 次连接 · 1 个目标 · 0 个来源 IP",
+  );
+  await invariant(page);
+  // 行内按钮按用户或节点筛选。
+  await page.locator(".mb-custom-conn-toolbar").getByRole("button", { name: "清空筛选" }).click();
+  await expect(page).toHaveURL(/#\/admin\/connections$/);
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(2);
+  await page.getByRole("button", { name: `按${reader.name}筛选连接日志` }).first().click();
+  await expect(page).toHaveURL(new RegExp(`user=${userId}`));
+  const hashParam = (name: string) =>
+    page.evaluate(
+      (key) =>
+        new URLSearchParams(location.hash.split("?")[1] ?? "").get(key),
+      name,
+    );
+  await page
+    .getByRole("button", { name: "按Tokyo · Direct筛选连接日志" })
+    .first()
+    .click();
+  await expect.poll(() => hashParam("node")).toBe(`basic:${nodeId}`);
+  await expect(page.getByLabel("节点", { exact: true })).toHaveValue(
+    `basic:${nodeId}`,
+  );
+  // 用户行与节点行的入口带上筛选跳转。
+  await page.goto("/#/admin/users");
+  await expect(page.locator(".mb-custom-loading")).toHaveCount(0);
+  const readerRow = page
+    .getByRole("row")
+    .filter({ has: page.getByRole("button", { name: `查看${reader.name}的连接日志` }) });
+  await expect(readerRow).toHaveCount(1);
+  await expect(readerRow.getByText(/最近使用 /)).toBeVisible();
+  await readerRow
+    .getByRole("button", { name: `查看${reader.name}的连接日志` })
+    .click();
+  await expect(page).toHaveURL(new RegExp(`connections\\?user=${userId}`));
+  await expect(page.getByLabel("用户", { exact: true })).toHaveValue(
+    String(userId),
+  );
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(2);
+  await page.goto("/#/admin/nodes");
+  await expect(page.locator(".mb-custom-loading")).toHaveCount(0);
+  const logNodeRow = page.getByRole("row").filter({
+    has: page.getByRole("button", { name: "查看Tokyo · Direct的连接日志" }),
+  });
+  await expect(logNodeRow).toHaveCount(1);
+  await expect(logNodeRow.getByText(/最近使用用户 /)).toBeVisible();
+  await logNodeRow
+    .getByRole("button", { name: "查看Tokyo · Direct的连接日志" })
+    .click();
+  await expect.poll(() => hashParam("node")).toBe(`basic:${nodeId}`);
+  await expect(page.getByLabel("节点", { exact: true })).toHaveValue(
+    `basic:${nodeId}`,
+  );
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(2);
+  // 筛选无结果与节点尚未上报时给出下一步。
+  await page.getByLabel("搜索", { exact: true }).fill("nothere.example");
+  await expect(page.getByText("调整筛选条件", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "清空筛选" }).last().click();
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(2);
+  const connectionsAPI = (url: URL) => url.pathname === "/api/v1/admin/connections";
+  await page.route(connectionsAPI, (route) =>
+    route.fulfill({
+      json: {
+        data: {
+          rows: [],
+          total: 0,
+          connections: 0,
+          targets: 0,
+          sources: 0,
+          hours: 24,
+          retention_days: 7,
+        },
+      },
+    }),
+  );
+  await page.goto("/#/admin/connections");
+  // 地址只差查询串时浏览器按同文档跳转处理，刷新一次确保重新请求。
+  await page.reload();
+  await expect(page.getByText("等待节点上报连接", { exact: true })).toBeVisible();
+  await expect(page.getByText(/保留 7 天后自动清理/).first()).toBeVisible();
+  await invariant(page);
+  await page.unroute(connectionsAPI);
+  await page.reload();
+  await expect(page.locator(".mb-custom-conn-table tbody tr")).toHaveCount(2);
+  await invariant(page);
+});

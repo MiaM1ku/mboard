@@ -77,6 +77,8 @@ version: motion-2026-10-13
 | 额度进度 | .usage-track 的状态色 is-ok、is-warning、is-danger | src/web/styles.css | 额度、余量进度 | 已实现 |
 | 流量池卡片 | .mb-custom-pool-grid, .mb-custom-pool-card, .mb-custom-pool-head, .mb-custom-pool-figure | src/web/styles.css | 周期额度概览 | 已实现 |
 | 额度数值 | .mb-custom-quota-figure | src/web/styles.css | 已用量和额度并排 | 已实现 |
+| 活跃时间 | LastActive; .mb-custom-active, .mb-custom-active-dot, .mb-custom-active-time | src/web/AdminPages.tsx, styles.css | 上次活跃列、相对时间和活跃标记 | 已实现 |
+| 连接日志 | .mb-custom-conn-toolbar, .mb-custom-conn-summary, .mb-custom-conn-table, .mb-custom-conn-who, .mb-custom-conn-link, .mb-custom-conn-target, .mb-custom-conn-host, .mb-custom-conn-port, .mb-custom-conn-net, .mb-custom-conn-count, .mb-custom-conn-foot | src/web/styles.css | 连接日志页的筛选、目标配色与页脚 | 已实现 |
 
 [SHOULD] 最小组合：`<Card><div className="card-header"><h2>标题</h2></div><div className="card-body">内容</div></Card>`。
 [SHOULD] 控件组合：`<Field label="名称"><Input required /></Field>`。

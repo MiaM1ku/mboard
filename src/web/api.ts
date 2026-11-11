@@ -82,6 +82,22 @@ export function formatDate(s?: string | null) {
         hour12: false,
       }).format(d);
 }
+const RELATIVE_UNITS: { limit: number; step: number; label: string }[] = [
+  { limit: 60, step: 60, label: "分钟" },
+  { limit: 3600, step: 3600, label: "小时" },
+  { limit: 7 * 86400, step: 86400, label: "天" },
+];
+/** 刚刚 / N 分钟前 / N 小时前 / N 天前；超过 30 天回到完整日期。 */
+export function formatRelative(iso?: string | null, now = Date.now()) {
+  if (!iso) return "暂无记录";
+  const time = new Date(iso).getTime();
+  if (Number.isNaN(time)) return "请核验时间";
+  const elapsed = Math.max(0, Math.floor((now - time) / 1000));
+  if (elapsed < 60) return "刚刚";
+  if (elapsed >= 30 * 86400) return formatDate(iso);
+  const unit = RELATIVE_UNITS.find((item) => elapsed < item.limit) ?? RELATIVE_UNITS[2]!;
+  return `${Math.floor(elapsed / unit.step)} ${unit.label}前`;
+}
 export function subscriptionUrl(user: {
   subscription_token: string;
   subscription_url?: string;

@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { LoaderCircle } from "lucide-react";
-import { api, useResource, formatBytes, formatDate } from "./api";
+import { api, useResource, formatBytes, formatDate, formatRelative } from "./api";
 import type {
   User,
   Node,
@@ -41,6 +41,7 @@ import { TrafficChart } from "./TrafficChart";
 import { AnimatedValue } from "./motion";
 import { SubscriptionTemplates } from "./SubscriptionTemplates";
 import { TrafficReports } from "./TrafficReports";
+import { ConnectionLog } from "./ConnectionLog";
 
 const ROOT = "/api/v1/admin";
 const count = (value: number) => value.toLocaleString("zh-CN");
@@ -103,6 +104,27 @@ function Online({ value }: { value: boolean }) {
     <Badge tone={value ? "success" : "neutral"}>
       {value ? "在线" : "待连接"}
     </Badge>
+  );
+}
+/** 最近一次连接上报带来的活跃时间：相对时间为主，完整时间放在 title 中。 */
+function LastActive({ at, hint }: { at?: string | null; hint?: string | null }) {
+  if (!at) return <span className="mb-custom-meta">暂无记录</span>;
+  const time = new Date(at).getTime();
+  const active = !Number.isNaN(time) && Date.now() - time < 5 * 60 * 1000;
+  return (
+    <>
+      <span className="mb-custom-active-time" title={formatDate(at)}>
+        {active ? (
+          <span className="mb-custom-active">
+            <span className="mb-custom-active-dot" aria-hidden />
+            活跃中 · {formatRelative(at)}
+          </span>
+        ) : (
+          formatRelative(at)
+        )}
+      </span>
+      {hint && <div className="mb-custom-meta">{hint}</div>}
+    </>
   );
 }
 function Check({
@@ -1303,7 +1325,7 @@ type UserDraft = {
   expires_original: string | null;
   group_ids: number[];
 };
-function UsersPage() {
+function UsersPage({ onNavigate }: { onNavigate: (page: string) => void }) {
   const users = useResource<AdminUser[]>(`${ROOT}/users`);
   const groups = useResource<Group[]>(`${ROOT}/groups`);
   return (
@@ -1360,6 +1382,16 @@ function UsersPage() {
       consequences={() =>
         "删除将清理账户、订阅凭据、访问授权、登录会话和问题会话。请先保存需要留存的沟通记录。管理员账户适用最后一位管理员保护规则。"
       }
+      extraActions={(user) => (
+        <Button
+          variant="ghost"
+          size="small"
+          aria-label={`查看${user.name || user.email}的连接日志`}
+          onClick={() => onNavigate(`connections?user=${user.id}`)}
+        >
+          连接日志
+        </Button>
+      )}
       columns={[
         {
           label: "用户",
@@ -1395,6 +1427,19 @@ function UsersPage() {
                   : "按实际用量累计"}
               </div>
             </>
+          ),
+        },
+        {
+          label: "上次活跃",
+          render: (user) => (
+            <LastActive
+              at={user.last_active_at}
+              hint={
+                user.last_active_node
+                  ? `最近使用 ${user.last_active_node}`
+                  : undefined
+              }
+            />
           ),
         },
         {
@@ -1616,7 +1661,7 @@ function EntryEditor({
     </div>
   );
 }
-function NodesPage() {
+function NodesPage({ onNavigate }: { onNavigate: (page: string) => void }) {
   const nodes = useResource<Node[]>(`${ROOT}/nodes`);
   const machines = useResource<Machine[]>(`${ROOT}/machines`);
   const groups = useResource<Group[]>(`${ROOT}/groups`);
@@ -1696,13 +1741,33 @@ function NodesPage() {
         "删除将从订阅和机器配置中移除这个节点。连接此节点的客户端需要选择其他可用节点。"
       }
       runtimeAction={(node) => (
+        <>
+          <Button
+            variant="ghost"
+            size="small"
+            aria-label={`查看${node.name}的运行配置`}
+            onClick={() => setConfigNode(node)}
+          >
+            配置
+          </Button>
+          <Button
+            variant="ghost"
+            size="small"
+            aria-label={`查看${node.name}的连接日志`}
+            onClick={() => onNavigate(`connections?node=runtime:${node.id}`)}
+          >
+            日志
+          </Button>
+        </>
+      )}
+      extraActions={(node) => (
         <Button
           variant="ghost"
           size="small"
-          aria-label={`查看${node.name}的运行配置`}
-          onClick={() => setConfigNode(node)}
+          aria-label={`查看${node.name}的连接日志`}
+          onClick={() => onNavigate(`connections?node=basic:${node.id}`)}
         >
-          配置
+          日志
         </Button>
       )}
       columns={[
@@ -1740,6 +1805,19 @@ function NodesPage() {
               <Enabled value={node.enabled} />
               <Online value={node.online} />
             </div>
+          ),
+        },
+        {
+          label: "上次活跃",
+          render: (node) => (
+            <LastActive
+              at={node.last_active_at}
+              hint={
+                node.last_active_user
+                  ? `最近使用用户 ${node.last_active_user}`
+                  : undefined
+              }
+            />
           ),
         },
         {
@@ -2927,9 +3005,11 @@ export function AdminPage({
     case "overview":
       return <OverviewPage onNavigate={onNavigate} />;
     case "users":
-      return <UsersPage />;
+      return <UsersPage onNavigate={onNavigate} />;
     case "nodes":
-      return <NodesPage />;
+      return <NodesPage onNavigate={onNavigate} />;
+    case "connections":
+      return <ConnectionLog />;
     case "machines":
       return <MachinesPage />;
     case "pools":

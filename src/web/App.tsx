@@ -14,6 +14,7 @@ import {
   Menu,
   Moon,
   Network,
+  ScrollText,
   Settings2,
   ShieldCheck,
   Sun,
@@ -50,12 +51,15 @@ const adminNav = [
   { key: "pools", label: "流量池", icon: Gauge },
   { key: "users", label: "用户授权", icon: Users },
   { key: "groups", label: "权限组", icon: ShieldCheck },
+  { key: "connections", label: "连接日志", icon: ScrollText },
   { key: "content", label: "公告和指南", icon: FileText },
   { key: "tickets", label: "问题会话", icon: LifeBuoy },
   { key: "settings", label: "站点设置", icon: Settings2 },
 ];
 function readRoute() {
-  const [area, page] = location.hash.replace(/^#\/?/, "").split("/");
+  const [area, segment] = location.hash.replace(/^#\/?/, "").split("/");
+  // 查询串留给页面自身读取，路由只取 ? 之前的片段。
+  const page = (segment ?? "").split("?")[0];
   return {
     area: area === "admin" ? "admin" : "user",
     page: page || "overview",
