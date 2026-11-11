@@ -3,6 +3,8 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpRight,
+  CalendarDays,
+  CalendarRange,
   BookOpen,
   Check,
   Copy,
@@ -13,6 +15,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Signal,
+  Zap,
   SlidersHorizontal,
 } from "lucide-react";
 import {
@@ -67,7 +70,9 @@ function Kpi({
     <Card className="kpi-card">
       <div className="kpi-top">
         <span>{title}</span>
-        {icon}
+        <span className="kpi-icon" aria-hidden>
+          {icon}
+        </span>
       </div>
       <div className="kpi-value">
         <AnimatedValue value={value} format={format} />
@@ -141,19 +146,19 @@ function Home({
           title: "今日",
           value: data.today_bytes.upload_bytes + data.today_bytes.download_bytes,
           hint: `上传 ${formatBytes(data.today_bytes.upload_bytes)} · 下载 ${formatBytes(data.today_bytes.download_bytes)}`,
-          icon: <Signal size={18} />,
+          icon: <Zap size={18} />,
         },
         {
           title: "近 7 天",
           value: data.week_bytes.upload_bytes + data.week_bytes.download_bytes,
           hint: `上传 ${formatBytes(data.week_bytes.upload_bytes)} · 下载 ${formatBytes(data.week_bytes.download_bytes)}`,
-          icon: <ArrowUp size={18} />,
+          icon: <CalendarRange size={18} />,
         },
         {
           title: "本月",
           value: data.month_bytes.upload_bytes + data.month_bytes.download_bytes,
           hint: `上传 ${formatBytes(data.month_bytes.upload_bytes)} · 下载 ${formatBytes(data.month_bytes.download_bytes)}`,
-          icon: <ArrowDown size={18} />,
+          icon: <CalendarDays size={18} />,
         },
       ]
     : [];

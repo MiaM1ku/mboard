@@ -6,7 +6,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { LoaderCircle } from "lucide-react";
+import { CalendarDays, LoaderCircle, Network, Users, Zap } from "lucide-react";
 import { api, useResource, formatBytes, formatDate, formatRelative } from "./api";
 import type {
   User,
@@ -35,6 +35,7 @@ import {
   ErrorState,
   Modal,
   ShareBar,
+  StatCard,
   useToast,
 } from "./ui";
 import { TrafficChart } from "./TrafficChart";
@@ -655,72 +656,61 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: string) => void }) {
         {(data) => (
           <>
             <div className="kpi-grid">
-              <Card>
-                <div className="card-body">
-                  <div className="mb-custom-meta">今日流量</div>
-                  <div className="kpi-value">
-                    <AnimatedValue
-                      value={trafficTotal(data.today)}
-                      format={formatBytes}
-                    />
-                  </div>
-                  <p className="mb-custom-stat-note">
-                    上传 {formatBytes(data.today.upload_bytes)} · 下载{" "}
-                    {formatBytes(data.today.download_bytes)}
-                  </p>
-                </div>
-              </Card>
-              <Card>
-                <div className="card-body">
-                  <div className="mb-custom-meta">本月流量</div>
-                  <div className="kpi-value">
-                    <AnimatedValue
-                      value={trafficTotal(data.month)}
-                      format={formatBytes}
-                    />
-                  </div>
-                  <p className="mb-custom-stat-note">
-                    本月累计，按 UTC 日期统计
-                  </p>
-                </div>
-              </Card>
-              <Card>
-                <div className="card-body">
-                  <div className="mb-custom-meta">活跃用户</div>
-                  <div className="kpi-value">
-                    <AnimatedValue value={data.active_users} format={count} />
-                  </div>
-                  <p className="mb-custom-stat-note">
-                    {count(data.enabled_users)} 个启用账户 · 区间内有流量
-                  </p>
+              <StatCard
+                title="今日流量"
+                icon={<Zap size={18} />}
+                hint={`上传 ${formatBytes(data.today.upload_bytes)} · 下载 ${formatBytes(data.today.download_bytes)}`}
+              >
+                <AnimatedValue
+                  value={trafficTotal(data.today)}
+                  format={formatBytes}
+                />
+              </StatCard>
+              <StatCard
+                title="本月流量"
+                icon={<CalendarDays size={18} />}
+                hint="本月累计，按 UTC 日期统计"
+              >
+                <AnimatedValue
+                  value={trafficTotal(data.month)}
+                  format={formatBytes}
+                />
+              </StatCard>
+              <StatCard
+                title="活跃用户"
+                icon={<Users size={18} />}
+                hint={`${count(data.enabled_users)} 个启用账户 · 区间内有流量`}
+                action={
                   <Button
+                    className="kpi-link"
                     variant="ghost"
                     size="small"
                     onClick={() => onNavigate("users")}
                   >
                     管理用户 →
                   </Button>
-                </div>
-              </Card>
-              <Card>
-                <div className="card-body">
-                  <div className="mb-custom-meta">节点在线</div>
-                  <div className="kpi-value">
-                    <AnimatedValue value={data.online_nodes} format={count} />
-                    <span className="muted"> / {count(data.nodes)}</span>
-                  </div>
-                  <p className="mb-custom-stat-note">
-                    机器 {count(data.online_machines)} / {count(data.machines)} 在线
-                  </p>
+                }
+              >
+                <AnimatedValue value={data.active_users} format={count} />
+              </StatCard>
+              <StatCard
+                title="节点在线"
+                icon={<Network size={18} />}
+                hint={`机器 ${count(data.online_machines)} / ${count(data.machines)} 在线`}
+                action={
                   <Button
+                    className="kpi-link"
                     variant="ghost"
                     size="small"
                     onClick={() => onNavigate("nodes")}
                   >
                     配置节点 →
                   </Button>
-                </div>
-              </Card>
+                }
+              >
+                <AnimatedValue value={data.online_nodes} format={count} />
+                <span className="muted"> / {count(data.nodes)}</span>
+              </StatCard>
             </div>
             <Card>
               <div className="card-header mb-custom-toolbar">

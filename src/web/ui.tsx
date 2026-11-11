@@ -15,7 +15,7 @@ import {
   type TextareaHTMLAttributes,
   type ReactNode,
 } from "react";
-import { AlertCircle, Check, LoaderCircle, X } from "lucide-react";
+import { AlertCircle, Check, Eye, EyeOff, Inbox, LoaderCircle, X } from "lucide-react";
 
 export function Button({
   variant = "primary",
@@ -71,6 +71,30 @@ export function Input({
 }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={`input ${className}`} {...props} />;
 }
+export function PasswordInput({
+  className = "",
+  ...props
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "type">) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="password-field">
+      <input
+        className={`input ${className}`}
+        {...props}
+        type={visible ? "text" : "password"}
+      />
+      <button
+        type="button"
+        className="password-toggle"
+        aria-label={visible ? "隐藏密码内容" : "显示密码内容"}
+        aria-pressed={visible}
+        onClick={() => setVisible((value) => !value)}
+      >
+        {visible ? <EyeOff size={18} /> : <Eye size={18} />}
+      </button>
+    </div>
+  );
+}
 export function Select({
   className = "",
   ...props
@@ -121,6 +145,33 @@ export function Field({
     </div>
   );
 }
+export function StatCard({
+  title,
+  icon,
+  hint,
+  children,
+  action,
+}: {
+  title: string;
+  icon: ReactNode;
+  hint: ReactNode;
+  children: ReactNode;
+  action?: ReactNode;
+}) {
+  return (
+    <Card className="kpi-card">
+      <div className="kpi-top">
+        <span>{title}</span>
+        <span className="kpi-icon" aria-hidden>
+          {icon}
+        </span>
+      </div>
+      <div className="kpi-value">{children}</div>
+      <div className="kpi-hint">{hint}</div>
+      {action}
+    </Card>
+  );
+}
 export function PageHeader({
   title,
   description,
@@ -155,7 +206,7 @@ export function EmptyState({
   return (
     <div className="empty-state">
       <span className="empty-mark" aria-hidden>
-        ↗
+        <Inbox size={24} strokeWidth={1.75} />
       </span>
       <strong>{title}</strong>
       <p>{description}</p>

@@ -6,6 +6,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, setRuntimeEntryIPs, setMachineSniSniff, RuntimeCompileError } from './runtime';
 import { initializeTrafficReports, getReportSettings, saveReportSettings, buildPreview as buildTrafficReportPreview, enqueueReport, listReportRuns, recordReportTraffic, ReportError } from './traffic-reports';
 import { initializeTrafficPools, recordHourlyTraffic, listPools, savePool, deletePool, poolUsage, userPoolStatus, nodeUsage, dateRange, dailyTotals, userDailyTotals, activeUsers, nodeTrafficTotals, userNodeTraffic, userTrafficTotals, PoolError } from './traffic-pools';
+import { maintainPanel } from './maintenance';
 import { initializeConnectionLog, validateConnectionBatch, recordConnections, touchActive, listConnections, lastActiveForUsers, lastActiveForNodes, purgeUserConnections, ConnectionLogError, type ConnectionSource } from './connection-log';
 import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, renderShareLinks, selectSubscriptionFormat, TemplateValidationError, validateEntryIPs, validateEntryStrategy, EntryIPError, type EntryStrategy, type SubscriptionEndpoint } from './subscriptions';
 
@@ -90,7 +91,7 @@ export function createApp(options: AppOptions = {}) {
   for (const value of [accountLimit,peerLimit]) if (!Number.isSafeInteger(value) || value < 1 || value > 1000000) throw new Error('Login limits must be integers from 1 to 1000000');
   const db = openDatabase(options.dbPath);
   const now = options.now ?? (() => new Date());
-  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`);initializeTrafficReports(db,{now:now()});initializeTrafficPools(db);initializeConnectionLog(db); }
+  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`);initializeTrafficReports(db,{now:now()});initializeTrafficPools(db);initializeConnectionLog(db);maintainPanel(db,now()); }
   const stamp = () => now().toISOString();
   const get = (sql: string, ...args: any[]): Row | null => db.query(sql).get(...args) as Row | null;
   const all = (sql: string, ...args: any[]): Row[] => db.query(sql).all(...args) as Row[];
@@ -311,7 +312,7 @@ export function createApp(options: AppOptions = {}) {
             let allUp=0,allDown=0;for(const row of all('SELECT upload_bytes,download_bytes FROM users')){allUp+=row.upload_bytes;allDown+=row.download_bytes;if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围')}for(const s of sums.values()){allUp+=s.up;allDown+=s.down}if(![allUp,allDown,allUp+allDown].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查全站字节累计的安全范围');
             for(const[uid,s]of sums){const day=get('SELECT upload_bytes,download_bytes FROM traffic_daily WHERE user_id=? AND date=?',uid,stamp().slice(0,10));if(day&&![day.upload_bytes+s.up,day.download_bytes+s.down,day.upload_bytes+day.download_bytes+s.up+s.down].every(Number.isSafeInteger))fail(400,'VALIDATION','请检查账号每日字节累计的安全范围');run('UPDATE users SET upload_bytes=upload_bytes+?,download_bytes=download_bytes+? WHERE id=?',s.up,s.down,uid);run('INSERT INTO traffic_daily(user_id,date,upload_bytes,download_bytes) VALUES(?,?,?,?) ON CONFLICT(user_id,date) DO UPDATE SET upload_bytes=upload_bytes+excluded.upload_bytes,download_bytes=download_bytes+excluded.download_bytes',uid,stamp().slice(0,10),s.up,s.down)}
             run('INSERT INTO runtime_traffic_batches(machine_id,batch_id,created_at) VALUES(?,?,?)',runtimeID,batch,stamp());
-          });return json({accepted:true});
+          });maintainPanel(db,now());return json({accepted:true});
         }
         if(path==='/api/node/v1/connections'&&method==='POST'){
           const b=await body(req);stillAuthenticated();
@@ -370,6 +371,7 @@ export function createApp(options: AppOptions = {}) {
           if (eligibilityChanged) bump();
           return true;
         });
+        maintainPanel(db, now());
         return json({ accepted: true });
       }
       if (path === '/api/node/v1/connections' && method === 'POST') {

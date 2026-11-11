@@ -10,6 +10,7 @@ import {
   Gauge,
   LayoutDashboard,
   LifeBuoy,
+  Lock,
   LogOut,
   Menu,
   Moon,
@@ -30,31 +31,64 @@ import {
   Field,
   Input,
   Loading,
+  PasswordInput,
   ToastProvider,
   useToast,
 } from "./ui";
 import { UserPage } from "./UserPages";
 import { AdminPage } from "./AdminPages";
 
-const userNav = [
-  { key: "overview", label: "我的概览", icon: LayoutDashboard },
-  { key: "nodes", label: "节点用量", icon: BarChart3 },
-  { key: "traffic", label: "流量记录", icon: Activity },
-  { key: "guides", label: "使用指南", icon: BookOpen },
-  { key: "tickets", label: "联系管理员", icon: LifeBuoy },
-  { key: "account", label: "账号设置", icon: Settings2 },
+type NavItem = { key: string; label: string; icon: typeof Gauge };
+const userNav: { group: string; items: NavItem[] }[] = [
+  {
+    group: "用量",
+    items: [
+      { key: "overview", label: "我的概览", icon: LayoutDashboard },
+      { key: "nodes", label: "节点用量", icon: BarChart3 },
+      { key: "traffic", label: "流量记录", icon: Activity },
+    ],
+  },
+  {
+    group: "帮助与账号",
+    items: [
+      { key: "guides", label: "使用指南", icon: BookOpen },
+      { key: "tickets", label: "联系管理员", icon: LifeBuoy },
+      { key: "account", label: "账号设置", icon: Settings2 },
+    ],
+  },
 ];
-const adminNav = [
-  { key: "overview", label: "运行概览", icon: LayoutDashboard },
-  { key: "nodes", label: "节点管理", icon: Network },
-  { key: "machines", label: "服务器", icon: Waypoints },
-  { key: "pools", label: "流量池", icon: Gauge },
-  { key: "users", label: "用户授权", icon: Users },
-  { key: "groups", label: "权限组", icon: ShieldCheck },
-  { key: "connections", label: "连接日志", icon: ScrollText },
-  { key: "content", label: "公告和指南", icon: FileText },
-  { key: "tickets", label: "问题会话", icon: LifeBuoy },
-  { key: "settings", label: "站点设置", icon: Settings2 },
+const adminNav: { group: string; items: NavItem[] }[] = [
+  {
+    group: "总览",
+    items: [{ key: "overview", label: "运行概览", icon: LayoutDashboard }],
+  },
+  {
+    group: "网络资源",
+    items: [
+      { key: "nodes", label: "节点管理", icon: Network },
+      { key: "machines", label: "服务器", icon: Waypoints },
+      { key: "pools", label: "流量池", icon: Gauge },
+      { key: "connections", label: "连接日志", icon: ScrollText },
+    ],
+  },
+  {
+    group: "用户与权限",
+    items: [
+      { key: "users", label: "用户授权", icon: Users },
+      { key: "groups", label: "权限组", icon: ShieldCheck },
+    ],
+  },
+  {
+    group: "内容与支持",
+    items: [
+      { key: "content", label: "公告和指南", icon: FileText },
+      { key: "tickets", label: "问题会话", icon: LifeBuoy },
+    ],
+  },
+  {
+    group: "系统",
+    items: [{ key: "settings", label: "站点设置", icon: Settings2 }],
+  },
 ];
 function readRoute() {
   const [area, segment] = location.hash.replace(/^#\/?/, "").split("/");
@@ -158,9 +192,10 @@ function Workspace() {
   }, [mobile]);
   const user = auth.data?.user;
   const admin = route.area === "admin" && user?.role === "admin";
-  const nav = admin ? adminNav : userNav;
-  const page = nav.some((n) => n.key === route.page) ? route.page : "overview";
-  const name = nav.find((n) => n.key === page)?.label || "";
+  const groups = admin ? adminNav : userNav;
+  const items = groups.flatMap((g) => g.items);
+  const page = items.some((n) => n.key === route.page) ? route.page : "overview";
+  const name = items.find((n) => n.key === page)?.label || "";
   useLayoutEffect(() => {
     const section = navRef.current?.querySelector<HTMLElement>(".nav-section");
     const active = section?.querySelector<HTMLElement>(".nav-item.is-active");
@@ -248,22 +283,24 @@ function Workspace() {
         <nav>
           <div className="nav-section">
             <div className="mb-custom-nav-marker" aria-hidden style={{ height: navMarker.height, transform: `translateY(${navMarker.top}px)`, opacity: navMarker.height ? 1 : 0 }} />
-            <div className="nav-label">
-              {admin ? "管理工作区" : "我的工作区"}
-            </div>
-            {nav.map((item) => (
-              <a
-                key={item.key}
-                href={`#/${admin ? "admin" : "user"}/${item.key}`}
-                className={`nav-item ${page === item.key ? "is-active" : ""}`}
-                aria-current={page === item.key ? "page" : undefined}
-              >
-                <item.icon size={18} />
-                <span>{item.label}</span>
-                {page === item.key && (
-                  <ChevronRight size={14} className="nav-arrow" />
-                )}
-              </a>
+            {groups.map((group) => (
+              <div className="nav-group" key={group.group} role="group" aria-label={group.group}>
+                <div className="nav-label">{group.group}</div>
+                {group.items.map((item) => (
+                  <a
+                    key={item.key}
+                    href={`#/${admin ? "admin" : "user"}/${item.key}`}
+                    className={`nav-item ${page === item.key ? "is-active" : ""}`}
+                    aria-current={page === item.key ? "page" : undefined}
+                  >
+                    <item.icon size={18} />
+                    <span>{item.label}</span>
+                    {page === item.key && (
+                      <ChevronRight size={14} className="nav-arrow" />
+                    )}
+                  </a>
+                ))}
+              </div>
             ))}
           </div>
         </nav>
@@ -274,19 +311,28 @@ function Workspace() {
               href={`#/${admin ? "user" : "admin"}/overview`}
             >
               {admin ? <ArrowLeft size={18} /> : <ShieldCheck size={18} />}
-              <span>{admin ? "用户面板" : "管理面板"}</span>
+              <span>{admin ? "返回用户面板" : "进入管理面板"}</span>
               <ArrowUpRight size={14} className="nav-arrow" />
             </a>
           )}
-          <button
-            type="button"
-            className="nav-item"
-            onClick={() => void logout()}
-          >
-            <LogOut size={18} />
-            <span>退出登录</span>
-          </button>
-          <div className="sidebar-note">{brand} · independent by design</div>
+          <div className="sidebar-user">
+            <span className="avatar" aria-hidden>
+              {(user.name || user.email).slice(0, 1).toUpperCase()}
+            </span>
+            <div className="sidebar-user-text">
+              <strong>{user.name || user.email}</strong>
+              <span>{user.role === "admin" ? "管理员" : user.email}</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="退出登录"
+              title="退出登录"
+              onClick={() => void logout()}
+            >
+              <LogOut size={17} />
+            </Button>
+          </div>
         </div>
       </aside>
       <button
@@ -320,6 +366,24 @@ function Workspace() {
             <strong>{name}</strong>
           </div>
           <div className="topbar-actions">
+            {user.role === "admin" && (
+              <nav className="panel-switch" aria-label="切换面板">
+                <a
+                  href="#/user/overview"
+                  className={admin ? "" : "is-active"}
+                  aria-current={admin ? undefined : "page"}
+                >
+                  用户
+                </a>
+                <a
+                  href="#/admin/overview"
+                  className={admin ? "is-active" : ""}
+                  aria-current={admin ? "page" : undefined}
+                >
+                  管理
+                </a>
+              </nav>
+            )}
             <span className="workspace-label">
               <span className="status-dot" />
               {brand}
@@ -334,9 +398,6 @@ function Workspace() {
                 {dark ? <Sun size={18} /> : <Moon size={18} />}
               </span>
             </Button>
-            <span className="avatar" title={`${user.name} · ${user.email}`}>
-              {(user.name || user.email).slice(0, 1).toUpperCase()}
-            </span>
           </div>
         </header>
         <main key={`${admin ? "admin" : "user"}-${page}`} className="page-content mb-custom-page-enter">
@@ -449,8 +510,7 @@ function Auth({
                 setup ? "至少 12 位，推荐结合多个词语、数字和符号。" : undefined
               }
             >
-              <Input
-                type="password"
+              <PasswordInput
                 required
                 minLength={setup ? 12 : 1}
                 maxLength={200}
@@ -464,7 +524,10 @@ function Auth({
               <ArrowUpRight size={17} />
             </Button>
           </form>
-          <div className="login-footer">登录会话由 HttpOnly Cookie 保存。</div>
+          <div className="login-footer">
+            <Lock size={14} aria-hidden />
+            登录会话由 HttpOnly Cookie 保存。
+          </div>
         </div>
       </main>
       <aside className="login-aside">
@@ -478,22 +541,38 @@ function Auth({
           <p>
             从授权到连接，从运行状态到流量记录。让每一个入口，都有清晰的管理方式。
           </p>
-          <div className="login-feature">
-            <ShieldCheck size={18} />
-            权限组授权，访问范围清晰
-          </div>
-          <div className="login-feature">
-            <Network size={18} />
-            节点配置，统一分发
-          </div>
-          <div className="login-feature">
-            <Activity size={18} />
-            真实上报，每日用量可查
-          </div>
         </div>
-        <div className="login-aside-bottom">
-          <span>OWN YOUR CONNECTION</span>
-          <span>{brand}</span>
+        <div className="login-preview" aria-hidden>
+          <div className="login-preview-head">
+            <span>本期用量</span>
+            <span className="login-preview-pill">运行中</span>
+          </div>
+          <div className="login-preview-figure">
+            68.4 GB <small>/ 100 GB</small>
+          </div>
+          <div className="login-preview-track">
+            <span />
+          </div>
+          <div className="login-preview-bars">
+            {[38, 56, 44, 72, 52, 86, 64].map((height, index) => (
+              <i key={index} style={{ height: `${height}%` }} />
+            ))}
+          </div>
+          <div className="login-preview-caption">界面示意 · 示例数据</div>
+        </div>
+        <div className="login-features">
+          <div className="login-feature">
+            <ShieldCheck size={16} />
+            权限组授权
+          </div>
+          <div className="login-feature">
+            <Network size={16} />
+            节点统一分发
+          </div>
+          <div className="login-feature">
+            <Activity size={16} />
+            每日用量可查
+          </div>
         </div>
       </aside>
     </div>
