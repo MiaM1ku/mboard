@@ -125,8 +125,10 @@ export function createApp(options: AppOptions = {}) {
   const runtimeNodes=()=>{const machines=runtimeMachines();return runtimeNodeViews(db).map(n=>{const ready=n.machine_ids.some(mid=>machines.some(m=>m.id===mid&&m.online));return {...n,active:ready,machine_id:n.machine_ids[0]||null,group_ids:n.group_ids.map(Number),tls:n.protocol!=='shadowsocks',server_name:'',created_at:'',online:ready&&n.enabled}})};
   const userNodes=(u:Row)=>[...authorizedNodes(u).map(nodeView),...runtimeNodes().filter(n=>n.active&&n.enabled&&n.show&&active(u)&&n.group_ids.some(g=>groupsFor('user',u.id).includes(g)))];
   // Last-active decorations resolve names from one snapshot per request, so a
-  // long user list costs two queries instead of one lookup per row.
-  const nodeNameLookup=()=>{const names=new Map<string,string>();for(const node of runtimeNodes())names.set(`runtime:${node.id}`,node.name);for(const row of all('SELECT id,name FROM nodes'))names.set(`basic:${row.id}`,String(row.name??''));return (source:string,id:number)=>names.get(`${source}:${id}`)||`节点 #${id}`};
+  // long user list costs two queries instead of one lookup per row. Runtime node
+  // names come from the stored payload: rendering a label must never compile
+  // every machine config.
+  const nodeNameLookup=()=>{const names=new Map<string,string>();for(const row of all('SELECT id,payload FROM runtime_nodes')){try{const payload=JSON.parse(String(row.payload));if(typeof payload.name==='string'&&payload.name)names.set(`runtime:${row.id}`,payload.name);}catch{}}for(const row of all('SELECT id,name FROM nodes'))names.set(`basic:${row.id}`,String(row.name??''));return (source:string,id:number)=>names.get(`${source}:${id}`)||`节点 #${id}`};
   const userNameLookup=()=>{const names=new Map<number,string>();for(const row of all('SELECT id,name,email FROM users'))names.set(Number(row.id),String(row.name||row.email));return (id:number)=>id?names.get(id)||`用户 #${id}`:null};
   const activeStamp=(seconds:number|null|undefined)=>seconds?new Date(Number(seconds)*1000).toISOString():null;
   const sessionCookie = (req: Request, token: string, age: number) => `mboard_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${new URL(panelOriginFor(req) ?? req.url).protocol === 'https:' ? '; Secure' : ''}`;
