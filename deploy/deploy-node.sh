@@ -22,7 +22,7 @@ STAGE_ROOT=/opt/mboard-node-stage
 SERVICE=/etc/systemd/system/mboard-node.service
 # Published release digests. The release publisher updates these together with
 # deploy/install-mboard-node.sh; pass --sha-agent/--sha-core to pin another build.
-AGENT_SHA256=458ccfbcfc24f428184b9125456c7c246db9508c5d343bfa510c43294847490d
+AGENT_SHA256=85638b3577d0b65810d0922e1b8720871c383bb283315fd9f8938294c7dd8104
 CORE_SHA256=1e6b4ef716062484f52d3490c3b1c4d7798e8cd76aeaba3f01e9f3320c63bd90
 
 say() { printf '%s\n' "$*"; }
