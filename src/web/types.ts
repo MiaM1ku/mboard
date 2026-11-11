@@ -52,6 +52,9 @@ export interface Machine {
   version: string | null;
   online: boolean;
   config_revision: number;
+  runtime?: boolean;
+  state?: string;
+  sni_sniff?: boolean;
 }
 export interface TrafficPoint {
   date: string;

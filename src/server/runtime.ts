@@ -181,7 +181,7 @@ export function heartbeatRuntimeMachine(db: Database, machineID: number, body: {
   const matching=applied===current;db.query('UPDATE runtime_machines SET last_seen_at=?,version=?,applied_revision=?,core_ready=?,telemetry_ready=? WHERE id=?').run(new Date().toISOString(),String(body.version||'').slice(0,128),applied ?? null,Number(matching&&body.core_ready===true),Number(matching&&body.telemetry_ready===true),machineID);
   return {revision:current,applied_revision:applied ?? null,ready:matching&&body.core_ready===true&&body.telemetry_ready===true};
 }
-export function runtimeMachineViews(db: Database) { return (db.query('SELECT id,state,active,applied_revision,last_seen_at,version,core_ready,telemetry_ready,payload FROM runtime_machines ORDER BY id').all() as Row[]).map(m=>{const p=obj(m.payload);return {id:m.id,name:p.name||`Machine ${m.id}`,host:p.host||p.address||'',enabled:m.state!=='disabled',runtime:true,state:m.state,active:!!m.active,last_seen_at:m.last_seen_at,version:m.version,applied_revision:m.applied_revision,core_ready:!!m.core_ready,telemetry_ready:!!m.telemetry_ready};}); }
+export function runtimeMachineViews(db: Database) { return (db.query('SELECT id,state,active,applied_revision,last_seen_at,version,core_ready,telemetry_ready,payload FROM runtime_machines ORDER BY id').all() as Row[]).map(m=>{const p=obj(m.payload);return {id:m.id,name:p.name||`Machine ${m.id}`,host:p.host||p.address||'',enabled:m.state!=='disabled',runtime:true,state:m.state,active:!!m.active,last_seen_at:m.last_seen_at,version:m.version,applied_revision:m.applied_revision,core_ready:!!m.core_ready,telemetry_ready:!!m.telemetry_ready,sni_sniff:machineSniSniff(db, Number(m.id))};}); }
 export function runtimeNodeViews(db: Database) { const ms=runtimeMachineViews(db);const bindings=db.query('SELECT machine_id,node_id FROM runtime_bindings').all() as Row[];const all=nodes(db);const ns=new Map(all.map(n=>[Number(n.id),n]));const entries=runtimeEntries(db);return all.map(n=>{const root=rootFor(ns,n);const machine_ids=[...new Set(bindings.filter(b=>Number(b.node_id)===Number(root.id)||Number(b.node_id)===Number(n.id)).map(b=>Number(b.machine_id)))];const active=machine_ids.some(id=>ms.some(m=>m.id===id&&m.active&&m.core_ready&&m.telemetry_ready));const entry=entries.get(Number(n.id));return {id:Number(n.id),name:n.name,host:n.host,port:Number(n.port),server_port:Number(root.server_port||root.port),protocol:root.type||root.protocol,parent_id:Number(n.parent_id)||null,enabled:yes(n.enabled),show:yes(n.show),group_ids:arr(n.group_ids),entry_ips:entry?.entry_ips||[],entry_strategy:entry?.entry_strategy||'round-robin',rate:Number(n.rate ?? 1),rate_time_enable:yes(n.rate_time_enable,false),rate_time_ranges:arr(n.rate_time_ranges),tags:arr(n.tags),sort:Number(n.sort)||0,transfer_enable:Number(n.transfer_enable)||0,machine_ids,active,runtime:true,state:active?'active':'pending'};}).sort((a,b)=>a.sort-b.sort||a.id-b.id); }
 export function setRuntimeEntryIPs(db: Database, id: number, ips: string[], strategy = 'round-robin'): boolean {
   if (!db.query('SELECT id FROM runtime_nodes WHERE id=?').get(id)) return false;
@@ -189,6 +189,17 @@ export function setRuntimeEntryIPs(db: Database, id: number, ips: string[], stra
   db.query('INSERT INTO runtime_node_entries(node_id,entry_ips,entry_strategy,updated_at) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET entry_ips=excluded.entry_ips,entry_strategy=excluded.entry_strategy,updated_at=excluded.updated_at').run(id, JSON.stringify(ips), storedEntryStrategy(strategy), new Date().toISOString());
   return true;
 }
+/** Per-machine SNI sniff switch: the core logs at debug and sniffs destinations. */
+const sniSniffKey = (machineID: number) => `machine:${machineID}:sni_sniff`;
+export function machineSniSniff(db: Database, machineID: number): boolean {
+  const row = db.query('SELECT value FROM runtime_metadata WHERE key=?').get(sniSniffKey(machineID)) as Row | null;
+  return row?.value === '1';
+}
+export function setMachineSniSniff(db: Database, machineID: number, enabled: boolean) {
+  machine(db, machineID);
+  db.query('INSERT INTO runtime_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(sniSniffKey(machineID), enabled ? '1' : '0');
+}
+
 export function deactivateMachine(db: Database, machineID: number) { db.query("UPDATE runtime_machines SET state='pending',active=0,core_ready=0,telemetry_ready=0 WHERE id=?").run(machineID); }
 
 function tlsFor(root: Row, m: Row, files: RuntimeFile[]): Row | undefined {
@@ -459,6 +470,14 @@ export function compileMachine(db: Database, machineID: number): CompiledMachine
   };
   for(const rule of config.route.rules)visitRule(rule);
   config.experimental={...config.experimental,v2ray_api:{listen:'127.0.0.1:19090',stats:{enabled:true,users:traffic_labels.map(t=>t.label)}}};
+  // SNI sniff is opt-in per machine: it costs a debug-level core log, and the
+  // agent recovers the sniffed domain from those debug records.
+  if (machineSniSniff(db,machineID)) {
+    config.log={...(config.log||{}),level:'debug'};
+    const rules=arr(config.route.rules);
+    if(!rules.some(rule=>rule.action==='sniff'))rules.unshift({action:'sniff',sniffer:['tls','http','quic']});
+    config.route.rules=rules;
+  }
   const digest=sha(JSON.stringify({config,traffic_labels,files}));
   const revision=db.transaction(()=>{const key=`machine:${machineID}:config`;const old=db.query('SELECT value FROM runtime_metadata WHERE key=?').get(key) as Row | null;const prior=old?obj(old.value):{digest:'',revision:0};const revision=prior.digest===digest?Number(prior.revision):Number(prior.revision)+1;if(!Number.isSafeInteger(revision))fail('revision-overflow',`machine ${machineID}`);db.query('INSERT INTO runtime_metadata VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(key,JSON.stringify({digest,revision}));return revision;}).immediate();
   return {revision,config,traffic_labels,files,warnings:[...new Set(warnings)]};

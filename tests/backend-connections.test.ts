@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createApp } from '../src/server/app';
 import { hash } from '../src/server/database';
+import { compileMachine, ensureRuntimeIdentities } from '../src/server/runtime';
 
 // Synthetic rows only. Every app owns its own in-memory database and closes after the test.
 const apps: ReturnType<typeof createApp>[] = [];
@@ -21,6 +22,8 @@ function fixture() {
   db.query('INSERT INTO runtime_machines(id,state,active,token_hash,core_ready,telemetry_ready,core_version,payload) VALUES(?,?,?,?,?,?,?,?)').run(2, 'active', 1, hash(runtimeToken), 1, 1, '1.14', JSON.stringify({ id: 2, name: 'HK IX', host: 'hk.example.test' }));
   db.query('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?)').run(10, null, 'vless', 1, 1, JSON.stringify({ id: 10, name: 'HK Reality', parent_id: 0, host: 'hk.example.test', port: 443, server_port: 443, type: 'vless', enabled: 1, show: 1, group_ids: [1], created_at: '1700000000' }));
   db.query('INSERT INTO runtime_bindings VALUES(?,?,?)').run(2, 10, '{}');
+  // Machine views compile the configuration, which needs derived identities.
+  ensureRuntimeIdentities(db);
   db.query('INSERT INTO machines(id,name,host,enabled,token_hash,config_revision) VALUES(?,?,?,?,?,?)').run(5, 'Legacy', 'legacy.example.test', 1, hash(basicToken), 1);
   db.query('INSERT INTO nodes(id,name,host,port,protocol,enabled,machine_id,tls,server_name,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(20, 'Legacy Node', 'legacy.example.test', 8443, 'vless', 1, 5, 1, 'legacy.example.test', future);
   const userCookie = `mboard_session=${'c'.repeat(64)}`, adminCookie = `mboard_session=${'d'.repeat(64)}`;
@@ -237,5 +240,52 @@ describe('connection log browsing', () => {
     const page = await f.adminList('?hours=168');
     expect(page.data.total).toBe(1);
     expect(page.data.rows[0].target).toBe('example.com:443');
+  });
+});
+
+describe('SNI sniff switch', () => {
+  const toggle = (f: ReturnType<typeof fixture>, enabled: unknown, cookie = f.adminCookie) => f.request('/api/v1/admin/runtime-machines/2/sni-sniff', 'PATCH', { enabled }, cookie);
+
+  test('enabling switches the core to debug and adds the sniff action', async () => {
+    const f = fixture();
+    const before = compileMachine(f.db, 2);
+    expect((before.config.log as any).level).toBe('info');
+    expect((before.config.route.rules as any[]).some(rule => rule.action === 'sniff')).toBe(false);
+
+    const enabled = await toggle(f, true);
+    expect(enabled.status).toBe(200);
+    expect(enabled.data).toMatchObject({ id: 2, enabled: true });
+
+    const after = compileMachine(f.db, 2);
+    expect((after.config.log as any).level).toBe('debug');
+    expect((after.config.route.rules as any[])[0]).toEqual({ action: 'sniff', sniffer: ['tls', 'http', 'quic'] });
+    expect(after.revision).toBeGreaterThan(before.revision);
+
+    const machines = (await f.request('/api/v1/admin/machines', 'GET', undefined, f.adminCookie)).data;
+    expect(machines.find((machine: any) => machine.id === 2).sni_sniff).toBe(true);
+
+    // Repeating the same value keeps the revision, so no needless core restart.
+    const again = await toggle(f, true);
+    expect(again.data.revision).toBe(after.revision);
+
+    const disabled = await toggle(f, false);
+    expect(disabled.status).toBe(200);
+    const restored = compileMachine(f.db, 2);
+    expect((restored.config.log as any).level).toBe('info');
+    expect((restored.config.route.rules as any[]).some(rule => rule.action === 'sniff')).toBe(false);
+  });
+
+  test('the switch stays with the administrator', async () => {
+    const f = fixture();
+    expect((await toggle(f, true, f.userCookie)).status).toBe(403);
+  });
+
+  test('a payload without a boolean is rejected with guidance', async () => {
+    const f = fixture();
+    for (const body of [{}, { enabled: 'yes' }, { enabled: true, extra: 1 }]) {
+      const response = await f.request('/api/v1/admin/runtime-machines/2/sni-sniff', 'PATCH', body, f.adminCookie);
+      expect(response.status).toBe(400);
+      expect(response.body.error.code).toBe('VALIDATION');
+    }
   });
 });

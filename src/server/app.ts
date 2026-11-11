@@ -3,7 +3,7 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, extname } from 'node:path';
 import { isIP } from 'node:net';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, setRuntimeEntryIPs, RuntimeCompileError } from './runtime';
+import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, setRuntimeEntryIPs, setMachineSniSniff, RuntimeCompileError } from './runtime';
 import { initializeTrafficReports, getReportSettings, saveReportSettings, buildPreview as buildTrafficReportPreview, enqueueReport, listReportRuns, recordReportTraffic, ReportError } from './traffic-reports';
 import { initializeTrafficPools, recordHourlyTraffic, listPools, savePool, deletePool, poolUsage, userPoolStatus, nodeUsage, dateRange, dailyTotals, userDailyTotals, activeUsers, nodeTrafficTotals, userNodeTraffic, userTrafficTotals, PoolError } from './traffic-pools';
 import { initializeConnectionLog, validateConnectionBatch, recordConnections, touchActive, listConnections, lastActiveForUsers, lastActiveForNodes, purgeUserConnections, ConnectionLogError, type ConnectionSource } from './connection-log';
@@ -599,6 +599,16 @@ export function createApp(options: AppOptions = {}) {
         let ips: string[], strategy: EntryStrategy; try { ips = validateEntryIPs(b.entry_ips); strategy = validateEntryStrategy(b.entry_strategy); } catch (error) { if (error instanceof EntryIPError) fail(400, 'VALIDATION', error.message); throw error; }
         if (!setRuntimeEntryIPs(db, id, ips, strategy)) fail(404, 'NOT_FOUND', '请检查节点');
         audit(u, 'runtime-nodes.entries', id); return json({ id, entry_ips: ips, entry_strategy: strategy });
+      }
+      const runtimeSniff = path.match(/^\/api\/v1\/admin\/runtime-machines\/(\d+)\/sni-sniff$/);
+      if (runtimeSniff && method === 'PATCH') {
+        const id = integer(Number(runtimeSniff[1]), '机器 ID', 1);
+        const b = await body(req); pick(b, ['enabled']);
+        const enabled = boolean(b.enabled, 'SNI 嗅探状态') === 1;
+        // Enabling changes the compiled config, so the revision bumps and the
+        // machine applies it on its next config poll; the core restarts there.
+        const revision = atomic(() => { ensureSession(); setMachineSniSniff(db, id, enabled); const compiled = compileMachine(db, id); audit(u, 'runtime-machine.sni-sniff', id); return compiled.revision; });
+        return json({ id, enabled, revision });
       }
       if (path === '/api/v1/admin/settings') {
         if (method === 'GET') return json(settings());

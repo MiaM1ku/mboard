@@ -2058,6 +2058,35 @@ function MachinesPage() {
   const [rotating, setRotating] = useState<Machine | null>(null);
   const [busy, setBusy] = useState(false);
   const [mutationError, setMutationError] = useState("");
+  const [sniffTarget, setSniffTarget] = useState<Machine | null>(null);
+  const [sniffEnabled, setSniffEnabled] = useState(false);
+  const [sniffBusy, setSniffBusy] = useState(false);
+  const [sniffError, setSniffError] = useState("");
+  function openSniff(machine: Machine) {
+    setSniffError("");
+    setSniffEnabled(!!machine.sni_sniff);
+    setSniffTarget(machine);
+  }
+  async function saveSniff() {
+    if (!sniffTarget || sniffBusy) return;
+    setSniffBusy(true);
+    setSniffError("");
+    try {
+      await api(`${ROOT}/runtime-machines/${sniffTarget.id}/sni-sniff`, request("PATCH", { enabled: sniffEnabled }));
+      setSniffTarget(null);
+      machines.reload();
+      notify(
+        sniffEnabled
+          ? "已开启 SNI 嗅探，机器应用新配置后连接目标会显示域名"
+          : "已关闭 SNI 嗅探，连接目标恢复显示客户端请求的地址",
+        "success",
+      );
+    } catch (error) {
+      setSniffError(errorText(error));
+    } finally {
+      setSniffBusy(false);
+    }
+  }
   async function rotate() {
     if (!rotating || busy) return;
     setBusy(true);
@@ -2129,6 +2158,16 @@ function MachinesPage() {
         consequences={() =>
           "先转移或删除关联节点，再删除机器记录。删除成功后会清理机器接入凭据和流量批次确认记录。"
         }
+        runtimeAction={(machine) => (
+          <Button
+            variant="ghost"
+            size="small"
+            aria-label={`设置${machine.name}的 SNI 嗅探`}
+            onClick={() => openSniff(machine)}
+          >
+            SNI 嗅探
+          </Button>
+        )}
         columns={[
           {
             label: "机器",
@@ -2164,6 +2203,17 @@ function MachinesPage() {
             render: (machine) => (
               <span className="mono">{machine.config_revision}</span>
             ),
+          },
+          {
+            label: "SNI 嗅探",
+            render: (machine) =>
+              machine.runtime ? (
+                <Badge tone={machine.sni_sniff ? "success" : "neutral"}>
+                  {machine.sni_sniff ? "开启" : "关闭"}
+                </Badge>
+              ) : (
+                <span className="mb-custom-meta">—</span>
+              ),
           },
         ]}
         fields={(draft, update) => (
@@ -2235,6 +2285,51 @@ function MachinesPage() {
           轮换后使用新令牌接入机器。旧令牌立即失效，心跳、配置获取和流量上报需更新凭据后继续。请准备好机器配置再确认。
         </p>
         {mutationError && <ErrorState message={mutationError} />}
+      </Modal>
+      <Modal
+        open={!!sniffTarget}
+        onClose={() => {
+          if (!sniffBusy) setSniffTarget(null);
+        }}
+        title="SNI 嗅探"
+        description={
+          sniffTarget
+            ? `为「${sniffTarget.name}」开启后，连接日志里的 IP 目标会显示成嗅探到的域名。`
+            : ""
+        }
+        footer={
+          <>
+            <Button
+              variant="secondary"
+              disabled={sniffBusy}
+              onClick={() => setSniffTarget(null)}
+            >
+              取消
+            </Button>
+            <Button loading={sniffBusy} disabled={sniffBusy} onClick={saveSniff}>
+              保存设置
+            </Button>
+          </>
+        }
+      >
+        <div className="mb-custom-section-stack">
+          <Check
+            label="开启 SNI 嗅探"
+            checked={sniffEnabled}
+            onChange={setSniffEnabled}
+            hint="核心改为 debug 日志并嗅探 TLS ClientHello 与 HTTP Host。"
+          />
+          <div className="callout">
+            <div>
+              <strong>开启后的变化</strong>
+              <p>
+                客户端按 IP 直连时，连接日志的目标从 ip:port 变成嗅探到的域名:port。
+                核心日志量增加，机器应用新配置时会重启一次核心，代理连接随之重连。
+              </p>
+            </div>
+          </div>
+          {sniffError && <ErrorState message={sniffError} />}
+        </div>
       </Modal>
       <Modal
         open={!!secret}
