@@ -25,7 +25,7 @@ export interface TemplateValidation { valid: boolean; errors: TemplateIssue[]; w
 export interface RenderOptions {
   userAgent?: string; clientVersion?: string;
   /** Supplied by the caller; rendering never derives user metadata or reads it from the DB. */
-  metadata?: { app_name?: string; subs_link?: string; subs_domain?: string; subscribe_info?: string; /** Requesting client address; only a validated public IPv4 /24 reaches the template. */ client_ip?: string; upload_bytes?: number; download_bytes?: number; quota_bytes?: number; expires_at?: string | null };
+  metadata?: { app_name?: string; subs_link?: string; subs_domain?: string; subscribe_info?: string; /** Requesting client address; only a validated public IPv4 /24 or IPv6 /56 reaches the template. */ client_ip?: string; upload_bytes?: number; download_bytes?: number; quota_bytes?: number; expires_at?: string | null };
 }
 export const SHARE_FORMATS = ['shadowrocket', 'quantumultx', 'loon'] as const;
 export type ShareFormat = typeof SHARE_FORMATS[number];
@@ -683,19 +683,94 @@ function fillIni(config: IniConfig, generated: string[], names: string[], warnin
 }
 /** Domestic default for the DNS ECS hint when the requesting client address is unusable. */
 const DEFAULT_ECS_CIDR = '223.5.5.0/24';
+/** RFC 7871 keeps a subnet hint at 24 bits for IPv4 and 56 bits for IPv6. */
+const ECS_V4_PREFIX = 24;
+const ECS_V6_PREFIX = 56;
 /** Template values plus the renderer-computed `client_cidr`; callers cannot override it. */
 type TemplateMetadata = NonNullable<RenderOptions['metadata']> & { client_cidr: string };
-/** Keep only a public IPv4 /24; private, loopback, CGNAT and malformed values fall back to the domestic default. */
+/** Dotted quad octets; leading zeros stay rejected because some stacks read them as octal. */
+function ipv4Octets(text: string): [number, number, number, number] | null {
+  const parts = text.split('.');
+  if (parts.length !== 4) return null;
+  const octets = parts.map(part => (/^(?:0|[1-9]\d{0,2})$/.test(part) ? Number(part) : NaN));
+  if (octets.some(octet => !Number.isInteger(octet) || octet > 255)) return null;
+  return octets as [number, number, number, number];
+}
+/** A public IPv4 address becomes its /24; private, loopback, CGNAT, multicast, reserved, documentation,
+ *  benchmarking and malformed values return null. */
+function ipv4Cidr(text: string): string | null {
+  const octets = ipv4Octets(text);
+  if (!octets) return null;
+  const [a, b, c] = octets;
+  const reserved = a === 0 || a === 10 || a === 127 || a >= 224
+    || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+    || (a === 192 && b === 0 && (c === 0 || c === 2)) || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100)))
+    || (a === 203 && b === 0 && c === 113);
+  return reserved ? null : `${a}.${b}.${c}.0/${ECS_V4_PREFIX}`;
+}
+/** Eight 16-bit groups; a dotted-quad tail such as `2002:1f00:1:2::1.2.3.4` fills the last two groups. */
+function ipv6Groups(text: string): number[] | null {
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  // A dotted quad is legal only as the last token of the whole address, so the head before `::` never carries one.
+  const parse = (side: string, terminalQuad: boolean): number[] | null => {
+    if (side === '') return [];
+    const tokens = side.split(':'), groups: number[] = [];
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index]!;
+      if (token.includes('.')) {
+        const quad = ipv4Octets(token);
+        if (!quad || !terminalQuad || index !== tokens.length - 1) return null;
+        groups.push((quad[0] << 8) | quad[1], (quad[2] << 8) | quad[3]);
+        continue;
+      }
+      if (!/^[0-9A-Fa-f]{1,4}$/.test(token)) return null;
+      groups.push(parseInt(token, 16));
+    }
+    return groups;
+  };
+  const head = parse(halves[0]!, halves.length === 1);
+  const tail = halves[1] === undefined ? [] : parse(halves[1]!, true);
+  if (!head || !tail) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  if (head.length + tail.length > 7) return null;
+  return [...head, ...new Array<number>(8 - head.length - tail.length).fill(0), ...tail];
+}
+/** RFC 5952 text: lowercase, leading zeros dropped, the longest zero run written as `::`. */
+function formatIpv6(groups: number[]): string {
+  const hex = groups.map(group => group.toString(16));
+  let start = -1, length = 0;
+  for (let index = 0; index < groups.length;) {
+    if (groups[index] !== 0) { index++; continue; }
+    let end = index;
+    while (end < groups.length && groups[end] === 0) end++;
+    if (end - index > length) { start = index; length = end - index; }
+    index = end;
+  }
+  return length < 2 ? hex.join(':') : `${hex.slice(0, start).join(':')}::${hex.slice(start + length).join(':')}`;
+}
+/** Keep a public IPv4 /24 or an IPv6 /56 from global unicast 2000::/3. Private, loopback, link-local,
+ *  CGNAT, multicast, reserved, documentation, benchmarking and malformed values fall back to the domestic
+ *  default. An IPv4-mapped client is an IPv4 client, so it hints with the /24 it embeds. */
 function ecsCidr(value: unknown): string {
   if (typeof value !== 'string') return DEFAULT_ECS_CIDR;
-  const parts = value.trim().split('.');
-  if (parts.length !== 4) return DEFAULT_ECS_CIDR;
-  const octets = parts.map(part => (/^\d{1,3}$/.test(part) ? Number(part) : NaN));
-  if (octets.some(octet => !Number.isInteger(octet) || octet > 255)) return DEFAULT_ECS_CIDR;
-  const [a, b, c] = octets as [number, number, number, number];
-  const reserved = a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  return reserved ? DEFAULT_ECS_CIDR : `${a}.${b}.${c}.0/24`;
+  const text = value.trim();
+  if (!text.includes(':')) return ipv4Cidr(text) ?? DEFAULT_ECS_CIDR;
+  const groups = ipv6Groups(text);
+  if (!groups) return DEFAULT_ECS_CIDR;
+  if (groups.slice(0, 5).every(group => group === 0) && groups[5] === 0xffff) {
+    const embedded = [groups[6]! >> 8, groups[6]! & 0xff, groups[7]! >> 8, groups[7]! & 0xff].join('.');
+    return ipv4Cidr(embedded) ?? DEFAULT_ECS_CIDR;
+  }
+  // 2000::/3 is the only global unicast block. Inside it, the IETF protocol block 2001::/23 (Teredo,
+  // benchmarking), documentation 2001:db8::/32 and 6to4 2002::/16 describe no client subnet.
+  const [first, second] = groups as [number, number, ...number[]];
+  if ((first & 0xe000) !== 0x2000 || first === 0x2002 || (first === 0x2001 && (second < 0x200 || second === 0xdb8))) return DEFAULT_ECS_CIDR;
+  const prefix = groups.slice();
+  prefix[3] = prefix[3]! & 0xff00;
+  prefix.fill(0, 4);
+  return `${formatIpv6(prefix)}/${ECS_V6_PREFIX}`;
 }
 function metadataText(text: string, metadata: TemplateMetadata, keys: string[]): string {
   return text.replace(/\$(app_name|subs_link|subs_domain|subscribe_info|client_cidr)(?![A-Za-z0-9_])/g, (marker, key: string) => {

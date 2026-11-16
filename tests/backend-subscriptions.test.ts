@@ -699,7 +699,7 @@ test('the DNS ECS hint uses the requesting client /24 and never leaks the token'
   const nameserver = (metadata?: { client_ip?: string }) => parse(renderSubscription(template('clashmeta', content), [endpoint()], { metadata }).content).dns.nameserver[0];
   expect(nameserver({ client_ip: '112.10.20.33' })).toBe('https://dns.google/dns-query#ecs=112.10.20.0/24&ecs-override=true');
   expect(nameserver({ client_ip: '8.8.8.8' })).toBe('https://dns.google/dns-query#ecs=8.8.8.0/24&ecs-override=true');
-  for (const client_ip of ['10.1.2.3', '127.0.0.1', '192.168.1.5', '172.20.0.9', '100.64.3.4', '169.254.1.1', '1.2.3.256', '112.10.20.0/16', 'authored.example.test', '']) {
+  for (const client_ip of ['10.1.2.3', '127.0.0.1', '192.168.1.5', '172.20.0.9', '100.64.3.4', '169.254.1.1', '224.0.0.1', '240.0.0.1', '255.255.255.255', '192.0.2.5', '198.51.100.7', '203.0.113.9', '198.18.0.1', '01.2.3.4', '001.002.003.004', '1.2.3.256', '112.10.20.0/16', 'authored.example.test', '']) {
     expect(nameserver({ client_ip })).toBe('https://dns.google/dns-query#ecs=223.5.5.0/24&ecs-override=true');
   }
   expect(nameserver()).toBe('https://dns.google/dns-query#ecs=223.5.5.0/24&ecs-override=true');
@@ -707,4 +707,18 @@ test('the DNS ECS hint uses the requesting client /24 and never leaks the token'
   const rendered = renderSubscription({ name: 'surge', content: ini.replace('dns-server = 223.5.5.5', 'dns-server = 223.5.5.5, ecs-$client_cidr') }, [endpoint()], { metadata: { client_ip: '112.10.20.33' } }).content;
   expect(rendered).toContain('ecs-112.10.20.0/24');
   expect(rendered).not.toContain('$client_cidr');
+});
+
+test('the DNS ECS hint keeps the client /56 for IPv6 and the /24 behind an IPv4-mapped address', () => {
+  const content = 'proxies: []\nproxy-groups:\n  - {name: 选择, type: select, proxies: [DIRECT]}\ndns:\n  nameserver:\n    - "https://dns.google/dns-query#ecs=$client_cidr&ecs-override=true"\nrules: ["MATCH,选择"]\n';
+  const hint = (client_ip: string) => parse(renderSubscription(template('clashmeta', content), [endpoint()], { metadata: { client_ip } }).content).dns.nameserver[0];
+  const wrap = (cidr: string) => `https://dns.google/dns-query#ecs=${cidr}&ecs-override=true`;
+  expect(hint('2408:8214:1a3:9c50:8c1f:2b3c:4d5e:6f70')).toBe(wrap('2408:8214:1a3:9c00::/56'));
+  expect(hint('2408:8214:1a3:9cff::1')).toBe(wrap('2408:8214:1a3:9c00::/56'));
+  expect(hint('2A0A:1F00:0000:0000:0000:0000:0000:0001')).toBe(wrap('2a0a:1f00::/56'));
+  expect(hint('2001:4860:4860::8888')).toBe(wrap('2001:4860:4860::/56'));
+  expect(hint('::ffff:112.10.20.33')).toBe(wrap('112.10.20.0/24'));
+  for (const client_ip of ['::', '::1', 'fe80::1', 'fc00::1', 'fd12:3456:789a::1', 'fec0::1', 'ff02::1', '::1.2.3.4', '64:ff9b::1.2.3.4', '::ffff:10.1.2.3', '::ffff:224.0.0.1', '::ffff:01.2.3.4', '2001:db8::1', '2001:2::1', '2002:c0a8:101::1', '2001:0:1::1', '2001:db8:1.2.3.4::', '2002:1.2.3.4::1', '2408:8214:1a3:9c50', '2408::zz', '2408:8214:1a3:9c50::1::2', 'fe80::1%eth0']) {
+    expect(hint(client_ip)).toBe(wrap('223.5.5.0/24'));
+  }
 });
