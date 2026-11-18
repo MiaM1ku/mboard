@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { request as realHTTPSRequest } from 'node:https';
 import { main as cliMain } from '../scripts/traffic-reports';
 import { openDatabase } from '../src/server/database';
+import { initializeDomainTraffic } from '../src/server/domain-traffic';
 import { buildPreview, enqueueReport, formatReportBytes, getReportSettings, getReportRun, initializeTrafficReports, isPublicReportAddress, listReportRuns, pinnedReportTransport, recordReportTraffic, ReportError, reportPeriod, runReportWorker, saveReportSettings, tickReportSchedule, validateReportURL, type ReportTransportInput } from '../src/server/traffic-reports';
 
 const dbs: ReturnType<typeof openDatabase>[]=[];
@@ -228,5 +229,23 @@ describe('SSRF and bounded pinned HTTPS',()=>{
   test('production transport wall-clock timeout kills socket (offline socket factory)',async()=>{
     let destroyed=false;const factory=(()=>{const req=new EventEmitter() as any;req.destroy=()=>{destroyed=true;};req.end=()=>{};return req;}) as any;
     await expect(pinnedReportTransport({url:new URL('https://test.example.invalid'),address:{address:'8.8.8.8',family:4},headers:{},body:'{}',timeoutMs:5,maxResponseBytes:8},factory)).rejects.toThrow('TIMEOUT');expect(destroyed).toBe(true);
+  });
+});
+
+describe('TrafficReport top domain per user',()=>{
+  const hourAt=Math.floor(Date.parse('2026-10-13T20:00:00+08:00')/3600000)*3600;
+  const domain=(db:ReturnType<typeof openDatabase>,name:string,up:number,down:number,hour=hourAt,node=190)=>db.query("INSERT INTO domain_traffic VALUES('runtime',1,?,?,?,?,?)").run(node,hour,name,up,down);
+  test('adds the busiest domain of each ranked user and escapes it',()=>{
+    const db=fixture();traffic(db,500);initializeDomainTraffic(db);
+    domain(db,'small.example',10,10);domain(db,'big_site.example',700,300);domain(db,'big_site.example',50,0,hourAt-3600,191);
+    const p=buildPreview(db,'daily',reportAt);
+    expect(p.users[0]!.topDomain).toEqual({label:'big_site.example',bytes:'1050'});
+    expect(p.message).toContain('最高域名 big\\_site.example 1.03 KB');
+  });
+  test('rows outside the report window are ignored and a missing table is harmless',()=>{
+    const db=fixture();traffic(db,500);
+    expect(buildPreview(db,'daily',reportAt).users[0]!.topDomain).toBeUndefined();
+    initializeDomainTraffic(db);domain(db,'old.example',999,0,hourAt-3*86400);
+    const p=buildPreview(db,'daily',reportAt);expect(p.users[0]!.topDomain).toBeUndefined();expect(p.message).not.toContain('最高域名');
   });
 });

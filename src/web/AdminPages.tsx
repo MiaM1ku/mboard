@@ -2050,11 +2050,13 @@ function MachinesPage() {
   const [mutationError, setMutationError] = useState("");
   const [sniffTarget, setSniffTarget] = useState<Machine | null>(null);
   const [sniffEnabled, setSniffEnabled] = useState(false);
+  const [domainEnabled, setDomainEnabled] = useState(false);
   const [sniffBusy, setSniffBusy] = useState(false);
   const [sniffError, setSniffError] = useState("");
   function openSniff(machine: Machine) {
     setSniffError("");
     setSniffEnabled(!!machine.sni_sniff);
+    setDomainEnabled(!!machine.domain_traffic);
     setSniffTarget(machine);
   }
   async function saveSniff() {
@@ -2062,13 +2064,14 @@ function MachinesPage() {
     setSniffBusy(true);
     setSniffError("");
     try {
-      await api(`${ROOT}/runtime-machines/${sniffTarget.id}/sni-sniff`, request("PATCH", { enabled: sniffEnabled }));
+      if (sniffEnabled !== !!sniffTarget.sni_sniff)
+        await api(`${ROOT}/runtime-machines/${sniffTarget.id}/sni-sniff`, request("PATCH", { enabled: sniffEnabled }));
+      if (domainEnabled !== !!sniffTarget.domain_traffic)
+        await api(`${ROOT}/runtime-machines/${sniffTarget.id}/domain-traffic`, request("PATCH", { enabled: domainEnabled }));
       setSniffTarget(null);
       machines.reload();
       notify(
-        sniffEnabled
-          ? "已开启 SNI 嗅探，机器应用新配置后连接目标会显示域名"
-          : "已关闭 SNI 嗅探，连接目标恢复显示客户端请求的地址",
+        "已保存，机器应用新配置后生效",
         "success",
       );
     } catch (error) {
@@ -2152,7 +2155,7 @@ function MachinesPage() {
           <Button
             variant="ghost"
             size="small"
-            aria-label={`设置${machine.name}的 SNI 嗅探`}
+            aria-label={`设置${machine.name}的 SNI 嗅探与域名流量`}
             onClick={() => openSniff(machine)}
           >
             SNI 嗅探
@@ -2281,7 +2284,7 @@ function MachinesPage() {
         onClose={() => {
           if (!sniffBusy) setSniffTarget(null);
         }}
-        title="SNI 嗅探"
+        title="SNI 嗅探与域名流量"
         description={
           sniffTarget
             ? `为「${sniffTarget.name}」开启后，连接日志里的 IP 目标会显示成嗅探到的域名。`
@@ -2308,6 +2311,12 @@ function MachinesPage() {
             checked={sniffEnabled}
             onChange={setSniffEnabled}
             hint="核心改为 debug 日志并嗅探 TLS ClientHello 与 HTTP Host。"
+          />
+          <Check
+            label="开启域名流量统计"
+            checked={domainEnabled}
+            onChange={setDomainEnabled}
+            hint="节点读取核心本机的 Clash API，按主域名统计每个用户的上下行字节。需要带 with_clash_api 编译的 sing-box 核心，否则核心无法启动；建议同时开启 SNI 嗅探，否则按 IP 直连的流量只能归到 IP。"
           />
           <div className="callout">
             <div>

@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { request } from 'node:https';
+import { topDomainByUser } from './domain-traffic';
 
 /** Callers must authorize as admin before preview, settings, enqueue and run listing. */
 export type ReportKind = 'daily' | 'weekly' | 'monthly' | 'test';
@@ -142,7 +143,7 @@ export function formatReportBytes(value: bigint): string {
   return `${whole}${fraction ? '.'+fraction : ''} ${names[power]}`;
 }
 const markdown = (s: string) => s.replace(/[\\`*_\[\]]/g,'\\$&').replace(/[\r\n\x00-\x1f\x7f]/g,' ');
-export type ReportPreview = { kind: ReportKind; title: string; start_date: string; end_date: string; timezone: string; message: string; nodes: { label: string; bytes: string }[]; users: { label: string; bytes: string; topNode?: { label: string; bytes: string } }[]; warnings: string[] };
+export type ReportPreview = { kind: ReportKind; title: string; start_date: string; end_date: string; timezone: string; message: string; nodes: { label: string; bytes: string }[]; users: { label: string; bytes: string; topNode?: { label: string; bytes: string }; topDomain?: { label: string; bytes: string } }[]; warnings: string[] };
 function labels(db: Database) {
   const nodes = new Map<string, Row>(), profiles = new Map<string, Row>(), emails = new Map<string,string>(),basicNames=new Map<string,string>();
   if (tableExists(db,'legacy_records')) for (const r of rows(db,"SELECT kind,payload FROM legacy_records WHERE kind IN ('v2_server','v2_server_route_profile','v2_user')")) { const p = parse(r.payload); if (r.kind === 'v2_server') nodes.set(String(p.id),p); else if (r.kind === 'v2_server_route_profile') { profiles.set(String(p.id),p); if(p.uuid)profiles.set(String(p.uuid),p); } else emails.set(String(p.id),String(p.email || `Unknown User (${p.id})`)); }
@@ -204,10 +205,11 @@ export function buildPreview(db: Database, kind: ReportKind, now = new Date()): 
   if(hook && p.source_start*1000<hook && (p.source_end*1000>=dayMs(localDay(new Date(hook))) || (!oldNodes.length&&!oldUsers.length&&!oldUN.length))) {warnings.add('missing-history-boundary_warning');warnings.add('sources:legacy-shanghai-daily,pre-hook-utc-daily,post-hook-epoch-hourly');}
   const sorted=(map: Map<string,bigint>) => [...map].filter(([,b])=>b>0n).sort((a,b)=>a[1]===b[1]?a[0].localeCompare(b[0]):a[1]>b[1]?-1:1);
   const nodes=sorted(nodeTotals).slice(0,s.top_limit).map(([key,b])=>({label:names.get(key)!,bytes:b.toString()}));
-  const users=sorted(userTotals).slice(0,s.top_limit).map(([uid,b])=>{const top=sorted(byUser(uid))[0];return {label:l.emails.get(uid)||`Unknown User (${uid})`,bytes:b.toString(),...(top?{topNode:{label:names.get(top[0])!,bytes:top[1].toString()}}:{})};});
+  const topUsers=sorted(userTotals).slice(0,s.top_limit),domains=topDomainByUser(db,topUsers.map(([uid])=>Number(uid)),p.source_start,p.source_end);
+  const users=topUsers.map(([uid,b])=>{const top=sorted(byUser(uid))[0],domain=domains.get(Number(uid));return {label:l.emails.get(uid)||`Unknown User (${uid})`,bytes:b.toString(),...(top?{topNode:{label:names.get(top[0])!,bytes:top[1].toString()}}:{}),...(domain?{topDomain:{label:domain.domain,bytes:domain.bytes.toString()}}:{})};});
   const title=`# ${kind==='daily'?'每日':kind==='weekly'?'每周':'每月'}流量报告\n日期：${p.start_date}${p.start_date===p.end_date?'':' ~ '+p.end_date}`;
   const nodeLines=nodes.length?nodes.map((n,i)=>`${i+1}. ${markdown(n.label)}: ${formatReportBytes(BigInt(n.bytes))}`).join('\n'):'- 等待本周期流量记录';
-  const userLines=users.length?users.map((u,i)=>`${i+1}. ${markdown(u.label)}: ${formatReportBytes(BigInt(u.bytes))}${u.topNode?` · 最高节点 ${markdown(u.topNode.label)} ${formatReportBytes(BigInt(u.topNode.bytes))}`:''}`).join('\n'):'- 等待本周期流量记录';
+  const userLines=users.length?users.map((u,i)=>`${i+1}. ${markdown(u.label)}: ${formatReportBytes(BigInt(u.bytes))}${u.topNode?` · 最高节点 ${markdown(u.topNode.label)} ${formatReportBytes(BigInt(u.topNode.bytes))}`:''}${u.topDomain?` · 最高域名 ${markdown(u.topDomain.label)} ${formatReportBytes(BigInt(u.topDomain.bytes))}`:''}`).join('\n'):'- 等待本周期流量记录';
   const message=`${title}\n\n## 节点流量排行 (Top ${s.top_limit})\n${nodeLines}\n\n## 用户流量排行 (Top ${s.top_limit})\n${userLines}${warnings.size?'\n\n历史口径：旧记录按上海自然日，接入前 UTC 整日记录归入同名日期一次，接入后按小时。接入前出口流量合并在入口节点，保留整桶流量。':''}`;
   if(Buffer.byteLength(JSON.stringify({message}))>MAX_PAYLOAD)reject();
   return {kind,title,start_date:p.start_date,end_date:p.end_date,timezone:p.timezone,message,nodes,users,warnings:[...warnings]};

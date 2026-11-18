@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw, ScrollText } from "lucide-react";
-import { api, formatDate, useResource } from "./api";
+import { api, formatBytes, formatDate, useResource } from "./api";
 import type {
   ConnectionPage,
   ConnectionRow,
+  DomainTrafficPage,
   Node,
   User,
 } from "./types";
@@ -91,6 +92,10 @@ export function ConnectionLog() {
   const nodes = useResource<Node[]>(`${ROOT}/nodes`);
   const path = `admin/connections?${requestQuery(filters, 0)}`;
   const page = useResource<ConnectionPage>(path);
+  const domainParams = new URLSearchParams(requestQuery(filters, 0));
+  domainParams.delete("limit");
+  domainParams.delete("offset");
+  const domains = useResource<DomainTrafficPage>(`admin/domain-traffic?${domainParams.toString()}`);
   const [more, setMore] = useState<{
     path: string;
     rows: ConnectionRow[];
@@ -410,6 +415,38 @@ export function ConnectionLog() {
           </>
         )}
       </Card>
+      {domains.data && domains.data.rows.length > 0 && (
+        <Card>
+          <div className="card-body mb-custom-meta mb-custom-conn-summary">
+            域名流量 · {count(domains.data.domains)} 个域名 · 合计{" "}
+            {formatBytes(domains.data.total_bytes)}（显示前 {count(domains.data.rows.length)} 个）
+          </div>
+          <div className="table-wrap">
+            <table className="data-table mb-custom-conn-table">
+              <thead>
+                <tr>
+                  <th scope="col">域名</th>
+                  <th scope="col">上行</th>
+                  <th scope="col">下行</th>
+                  <th scope="col">合计</th>
+                  <th scope="col">用户数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {domains.data.rows.map((row) => (
+                  <tr key={row.domain}>
+                    <td className="mono">{row.domain}</td>
+                    <td>{formatBytes(row.upload_bytes)}</td>
+                    <td>{formatBytes(row.download_bytes)}</td>
+                    <td>{formatBytes(row.total_bytes)}</td>
+                    <td className="mb-custom-conn-count">{count(row.users)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
       <div className="callout">
         <ScrollText size={18} aria-hidden />
         <div>

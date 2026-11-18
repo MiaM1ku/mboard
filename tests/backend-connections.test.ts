@@ -289,3 +289,35 @@ describe('SNI sniff switch', () => {
     }
   });
 });
+
+describe('domain traffic switch and ingest', () => {
+  const toggle = (f: ReturnType<typeof fixture>, enabled: unknown, cookie = f.adminCookie) => f.request('/api/v1/admin/runtime-machines/2/domain-traffic', 'PATCH', { enabled }, cookie);
+
+  test('switch adds a stable loopback clash_api and removes it again', async () => {
+    const f = fixture();
+    expect((compileMachine(f.db, 2).config.experimental as any).clash_api).toBeUndefined();
+    expect((await toggle(f, true, f.userCookie)).status).toBe(403);
+    expect((await toggle(f, true)).status).toBe(200);
+    const on = compileMachine(f.db, 2), clash = (on.config.experimental as any).clash_api;
+    expect(clash.external_controller).toBe('127.0.0.1:19091');
+    expect(clash.secret).toMatch(/^[0-9a-f]{48}$/);
+    expect(compileMachine(f.db, 2).revision).toBe(on.revision);
+    const machines = (await f.request('/api/v1/admin/machines', 'GET', undefined, f.adminCookie)).data;
+    expect(machines.find((machine: any) => machine.id === 2).domain_traffic).toBe(true);
+    await toggle(f, false);
+    expect((compileMachine(f.db, 2).config.experimental as any).clash_api).toBeUndefined();
+  });
+
+  test('node batches are stored, skipped per record and listed for admins only', async () => {
+    const f = fixture();
+    const send = (records: unknown[], batch = 'd1') => f.request('/api/node/v1/domain-traffic', 'POST', { batch_id: batch, records }, undefined, { authorization: `Bearer ${f.runtimeToken}` });
+    const good = { user_id: 1, node_id: 10, hour: f.hour(), domain: 'example.com', upload_bytes: 5, download_bytes: 95 };
+    const result = await send([good, { ...good, node_id: 77 }]);
+    expect(result.data).toEqual({ accepted: true, stored: 1, skipped: 1, reused: false });
+    expect((await send([good])).data.reused).toBe(true);
+    expect((await send([{ ...good, domain: '' }], 'd2')).status).toBe(400);
+    const list = await f.request('/api/v1/admin/domain-traffic', 'GET', undefined, f.adminCookie);
+    expect(list.data).toMatchObject({ domains: 1, total_bytes: 100, rows: [{ domain: 'example.com', total_bytes: 100, users: 1 }] });
+    expect((await f.request('/api/v1/admin/domain-traffic', 'GET', undefined, f.userCookie)).status).toBe(403);
+  });
+});

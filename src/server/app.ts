@@ -3,10 +3,11 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve, sep, extname } from 'node:path';
 import { isIP } from 'node:net';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, setRuntimeEntryIPs, setMachineSniSniff, RuntimeCompileError } from './runtime';
+import { initializeRuntime as initializeNodeRuntime, compileMachine, authorizedEndpoints as runtimeEndpoints, authenticateRuntimeMachine, heartbeatRuntimeMachine, activateMachine, runtimeMachineViews, runtimeNodeViews, restoreRuntime, ensureRuntimeIdentities, rotateRuntimeIdentities, setRuntimeEntryIPs, setMachineSniSniff, setMachineDomainTraffic, RuntimeCompileError } from './runtime';
 import { initializeTrafficReports, getReportSettings, saveReportSettings, buildPreview as buildTrafficReportPreview, enqueueReport, listReportRuns, recordReportTraffic, ReportError } from './traffic-reports';
 import { initializeTrafficPools, recordHourlyTraffic, listPools, savePool, deletePool, poolUsage, userPoolStatus, nodeUsage, dateRange, dailyTotals, userDailyTotals, activeUsers, nodeTrafficTotals, userNodeTraffic, userTrafficTotals, PoolError } from './traffic-pools';
 import { maintainPanel } from './maintenance';
+import { initializeDomainTraffic, validateDomainTrafficBatch, recordDomainTraffic, listDomainTraffic, purgeUserDomainTraffic } from './domain-traffic';
 import { initializeConnectionLog, validateConnectionBatch, recordConnections, touchActive, listConnections, lastActiveForUsers, lastActiveForNodes, purgeUserConnections, ConnectionLogError, type ConnectionSource } from './connection-log';
 import { initializeSubscriptionTemplates, listTemplates, getTemplate, saveTemplate, validateTemplate, renderSubscription, renderShareLinks, selectSubscriptionFormat, TemplateValidationError, validateEntryIPs, validateEntryStrategy, EntryIPError, type EntryStrategy, type SubscriptionEndpoint } from './subscriptions';
 
@@ -91,7 +92,7 @@ export function createApp(options: AppOptions = {}) {
   for (const value of [accountLimit,peerLimit]) if (!Number.isSafeInteger(value) || value < 1 || value > 1000000) throw new Error('Login limits must be integers from 1 to 1000000');
   const db = openDatabase(options.dbPath);
   const now = options.now ?? (() => new Date());
-  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`);initializeTrafficReports(db,{now:now()});initializeTrafficPools(db);initializeConnectionLog(db);maintainPanel(db,now()); }
+  if (options.initializeRuntime !== false) { initializeSubscriptionTemplates(db); initializeNodeRuntime(db);db.exec(`CREATE TABLE IF NOT EXISTS runtime_traffic_batches(machine_id INTEGER NOT NULL,batch_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(machine_id,batch_id));CREATE TABLE IF NOT EXISTS runtime_node_traffic(node_id INTEGER NOT NULL,user_id INTEGER NOT NULL,date TEXT NOT NULL,upload_bytes INTEGER NOT NULL DEFAULT 0,download_bytes INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(node_id,user_id,date));`);initializeTrafficReports(db,{now:now()});initializeTrafficPools(db);initializeConnectionLog(db);initializeDomainTraffic(db);maintainPanel(db,now()); }
   const stamp = () => now().toISOString();
   const get = (sql: string, ...args: any[]): Row | null => db.query(sql).get(...args) as Row | null;
   const all = (sql: string, ...args: any[]): Row[] => db.query(sql).all(...args) as Row[];
@@ -322,6 +323,12 @@ export function createApp(options: AppOptions = {}) {
           const allowed=new Set(runtimeNodeViews(db).filter(node=>node.machine_ids.includes(runtimeID)).map(node=>node.id));
           return json(atomic(()=>{stillAuthenticated();return recordConnections(db,{source:'runtime',machine_id:runtimeID,batch_id:batch.batch_id,records:batch.records,now:now(),allowed_nodes:allowed})}));
         }
+        if(path==='/api/node/v1/domain-traffic'&&method==='POST'){
+          const b=await body(req);stillAuthenticated();
+          const batch=validateDomainTrafficBatch(b);
+          const allowed=new Set(runtimeNodeViews(db).filter(node=>node.machine_ids.includes(runtimeID)).map(node=>node.id));
+          return json(atomic(()=>{stillAuthenticated();return recordDomainTraffic(db,{source:'runtime',machine_id:runtimeID,batch_id:batch.batch_id,records:batch.records,now:now(),allowed_nodes:allowed})}));
+        }
         fail(404,'NOT_FOUND','请使用机器心跳、配置或流量接口');
       }
       const m = get('SELECT * FROM machines WHERE token_hash=? AND enabled=1', hash(bearer.slice(7)));
@@ -381,6 +388,15 @@ export function createApp(options: AppOptions = {}) {
         return json(atomic(() => {
           if (!get('SELECT 1 FROM machines WHERE id=? AND token_hash=? AND enabled=1', m.id, hash(bearer.slice(7)))) fail(401, 'NODE_AUTH', '机器设置有更新，请重新连接');
           return recordConnections(db, { source: 'basic', machine_id: m.id, batch_id: batch.batch_id, records: batch.records, now: now(), allowed_nodes: allowed });
+        }));
+      }
+      if (path === '/api/node/v1/domain-traffic' && method === 'POST') {
+        const b = await body(req);
+        const batch = validateDomainTrafficBatch(b);
+        const allowed = new Set(all('SELECT id FROM nodes WHERE machine_id=?', m.id).map(row => Number(row.id)));
+        return json(atomic(() => {
+          if (!get('SELECT 1 FROM machines WHERE id=? AND token_hash=? AND enabled=1', m.id, hash(bearer.slice(7)))) fail(401, 'NODE_AUTH', '机器设置有更新，请重新连接');
+          return recordDomainTraffic(db, { source: 'basic', machine_id: m.id, batch_id: batch.batch_id, records: batch.records, now: now(), allowed_nodes: allowed });
         }));
       }
       fail(404, 'NOT_FOUND', '请检查节点接口地址');
@@ -592,6 +608,24 @@ export function createApp(options: AppOptions = {}) {
         const paging = (key: string, min: number, max: number, fallback: number) => { const raw = param(key); if (!raw) return fallback; if (!/^\d+$/.test(raw)) fail(400, 'VALIDATION', '请填写有效的分页参数'); return integer(Number(raw), '分页参数', min, max); };
         return json(listConnections(db, { user_id: userId, node_id: nodeId, node_source: nodeSource as ConnectionSource | undefined, query: param('q'), hours: Number(hours), limit: paging('limit', 1, 200, 100), offset: paging('offset', 0, 10000, 0) }, now()));
       }
+      if (path === '/api/v1/admin/domain-traffic' && method === 'GET') {
+        const param = (key: string) => url.searchParams.get(key) ?? '';
+        const optional = (key: string, label: string) => { const raw = param(key); if (!raw) return undefined; if (!/^\d+$/.test(raw)) fail(400, 'VALIDATION', `请填写有效的${label}`); return integer(Number(raw), label, 1); };
+        const nodeId = optional('node_id', '节点 ID'), userId = optional('user_id', '用户 ID');
+        const nodeSource = param('node_source');
+        if (nodeId !== undefined && !['runtime', 'basic'].includes(nodeSource)) fail(400, 'VALIDATION', '请选择运行配置或基础节点');
+        const hours = param('hours') || '24';
+        if (!['1', '24', '168'].includes(hours)) fail(400, 'VALIDATION', '请选择最近 1 小时、24 小时或 7 天');
+        return json(listDomainTraffic(db, { user_id: userId, node_id: nodeId, node_source: nodeSource as ConnectionSource | undefined, query: param('q'), hours: Number(hours), limit: 50 }, now()));
+      }
+      const runtimeDomain = path.match(/^\/api\/v1\/admin\/runtime-machines\/(\d+)\/domain-traffic$/);
+      if (runtimeDomain && method === 'PATCH') {
+        const id = integer(Number(runtimeDomain[1]), '机器 ID', 1);
+        const b = await body(req); pick(b, ['enabled']);
+        const enabled = boolean(b.enabled, '域名流量状态') === 1;
+        const revision = atomic(() => { ensureSession(); setMachineDomainTraffic(db, id, enabled); const compiled = compileMachine(db, id); audit(u, 'runtime-machine.domain-traffic', id); return compiled.revision; });
+        return json({ id, enabled, revision });
+      }
       if (path === '/api/v1/admin/audit' && method === 'GET') return json(all('SELECT * FROM audit ORDER BY id DESC LIMIT 100'));
       if (path === '/api/v1/admin/tickets' && method === 'GET') return json(all('SELECT * FROM tickets ORDER BY id DESC').map(ticketView));
       const runtimeEntries = path.match(/^\/api\/v1\/admin\/runtime-nodes\/(\d+)\/entries$/);
@@ -653,7 +687,7 @@ export function createApp(options: AppOptions = {}) {
             if (table === 'users' && row.role === 'admin' && row.enabled && get("SELECT COUNT(*) count FROM users WHERE role='admin' AND enabled=1")!.count <= 1) fail(409, 'LAST_ADMIN', '请保留至少一个启用的管理员账号');
             if (table === 'machines' && get('SELECT id FROM nodes WHERE machine_id=? LIMIT 1', id)) fail(409, 'IN_USE', '请先转移或删除这台机器上的节点');
             if (table === 'groups' && (get('SELECT 1 FROM user_groups WHERE group_id=?', id) || get('SELECT 1 FROM node_groups WHERE group_id=?', id))) fail(409, 'IN_USE', '请先移除这个分组的用户和节点授权');
-            run(`DELETE FROM ${table} WHERE id=?`, id); if(table==='users')purgeUserConnections(db,id); if (['users','groups','nodes','machines'].includes(table)) bump(); audit(u, `${table}.delete`, id);
+            run(`DELETE FROM ${table} WHERE id=?`, id); if(table==='users'){purgeUserConnections(db,id);purgeUserDomainTraffic(db,id);} if (['users','groups','nodes','machines'].includes(table)) bump(); audit(u, `${table}.delete`, id);
           }); return json({ ok: true });
         }
         if ((!id && method === 'POST') || (id && method === 'PATCH')) {

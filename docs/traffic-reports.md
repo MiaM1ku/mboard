@@ -51,7 +51,7 @@ PATCH 仅接受以下字段，未知字段拒绝：
 
 时区固定 `Asia/Shanghai`，schedule 固定，不能借 PATCH 修改 URL 安全策略。所有实际设置编辑增加 revision，并取消 queued/processing 旧运行，包括手动运行。发送前 worker 再检查 revision/租约，防止旧运行静默发送到新的 URL。网络 POST 一旦开始，配置变更不能撤回。
 
-预览返回 `kind,title,start_date,end_date,timezone,message,nodes,users,warnings`。`nodes/users.bytes` 和 `topNode.bytes` 是十进制**字符串**，不要转 JS Number 后排序。预览有邮箱，只能在授权管理员界面显示。`kind='test'` 只返回合成迁移消息，不读流量、标签或邮箱。
+预览返回 `kind,title,start_date,end_date,timezone,message,nodes,users,warnings`。`nodes/users.bytes` 和 `topNode.bytes` 是十进制**字符串**，不要转 JS Number 后排序。预览有邮箱，只能在授权管理员界面显示。`users[].topDomain`（`{label,bytes}`，bytes 同为字符串）是该用户在报告周期内流量最多的主域名，来自节点上报的域名流量（`domain_traffic`，保留 35 天，需机器开启域名流量统计）；没有数据时省略该字段，消息行也不显示「最高域名」。`kind='test'` 只返回合成迁移消息，不读流量、标签或邮箱。
 
 运行 DTO 只含 `id,kind,status,period_key,start_date,end_date,timezone,attempts,http_status,error_code,created_at,next_attempt_at`，时间为 epoch 毫秒。没有 message、URL、Authorization 或源记录。手动入队总是创建独立运行，只有同一个 `idempotencyKey` 才返回同一个运行；同 key 不同 kind/手动模式拒绝。计划运行按 `(kind,source_start,source_end,timezone)` 唯一。停用计划后不会再创建或处理计划运行，显式管理员手动报告和测试仍可发送。
 

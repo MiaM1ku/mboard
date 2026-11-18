@@ -18,7 +18,7 @@ type Job = {
 type Preview = {
   kind: Period; title: string; start_date: string; end_date: string; timezone: string;
   message: string; nodes: { label: string; bytes: string }[];
-  users: { label: string; bytes: string; topNode?: { label: string; bytes: string } }[]; warnings: string[];
+  users: { label: string; bytes: string; topNode?: { label: string; bytes: string }; topDomain?: { label: string; bytes: string } }[]; warnings: string[];
 };
 const kinds: Record<Kind, string> = { daily: "日报", weekly: "周报", monthly: "月报", test: "测试消息" };
 const statuses: Record<Job["status"], { label: string; tone: "neutral" | "info" | "success" | "danger" }> = {

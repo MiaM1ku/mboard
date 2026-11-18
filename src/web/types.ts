@@ -55,6 +55,7 @@ export interface Machine {
   runtime?: boolean;
   state?: string;
   sni_sniff?: boolean;
+  domain_traffic?: boolean;
 }
 export interface TrafficPoint {
   date: string;
@@ -208,6 +209,19 @@ export interface ConnectionRow {
   network: ConnectionNetwork;
   user: { id: number; name: string; email: string } | null;
   node: { id: number; name: string; source: ConnectionSource } | null;
+}
+export interface DomainTrafficRow {
+  domain: string;
+  upload_bytes: number;
+  download_bytes: number;
+  total_bytes: number;
+  users: number;
+}
+export interface DomainTrafficPage {
+  rows: DomainTrafficRow[];
+  total_bytes: number;
+  domains: number;
+  hours: number;
 }
 export interface ConnectionPage {
   rows: ConnectionRow[];
